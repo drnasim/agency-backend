@@ -1,14 +1,14 @@
+require('dotenv').config(); // এটি সবার উপরে থাকবে
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http'); 
 const { Server } = require('socket.io'); 
-require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app); 
 
-// Socket.io সেটআপ (CORS পারমিশন সহ)
+// Socket.io সেটআপ
 const io = new Server(server, {
     cors: {
         origin: "*", 
@@ -27,7 +27,7 @@ const employeeRoutes = require('./routes/employees');
 const authRoutes = require('./routes/auth');
 const settingsRoutes = require('./routes/settings');
 const driveRoutes = require('./routes/drive');
-const chatRoutes = require('./routes/chat'); // নতুন চ্যাট রাউট
+const chatRoutes = require('./routes/chat');
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -35,19 +35,17 @@ app.use('/api/employees', employeeRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/drive', driveRoutes);
-app.use('/api/chat', chatRoutes); // চ্যাট API কানেক্ট করা হলো
+app.use('/api/chat', chatRoutes);
 
-// ================= Socket.io রিয়েল-টাইম ইভেন্ট =================
+// ================= Socket.io রিয়েল-টাইম ইভেন্ট =================
 io.on('connection', (socket) => {
     console.log(`🔌 User connected: ${socket.id}`);
 
-    // ইউজার কোনো চ্যাট রুমে (গ্রুপ বা প্রাইভেট) জয়েন করলে
     socket.on('join_room', (data) => {
         socket.join(data);
         console.log(`User ${socket.id} joined room: ${data}`);
     });
 
-    // নতুন মেসেজ আসলে সেটা ওই রুমের সবাইকে পাঠিয়ে দেওয়া
     socket.on('send_message', (data) => {
         socket.to(data.room).emit('receive_message', data);
     });
@@ -57,14 +55,15 @@ io.on('connection', (socket) => {
     });
 });
 
-// MongoDB কানেকশন
-mongoose.connect(process.env.MONGO_URI)
+// MongoDB কানেকশন (সরাসরি লিঙ্ক বসানো হলো)
+const uri = "mongodb+srv://nasimsarkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.3iqgbfe.mongodb.net/?retryWrites=true&w=majority&appName=fortivus-group-llc";
+mongoose.connect(uri)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
     .catch((err) => console.log('❌ DB Connection Error:', err));
 
+// পোর্ট সেটআপ (রেলওয়ে এটি অটো-ম্যানেজ করবে)
 const PORT = process.env.PORT || 5001;
 
-// app.listen এর বদলে server.listen ব্যবহার করতে হবে
 server.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
 });
