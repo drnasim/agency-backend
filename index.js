@@ -55,12 +55,14 @@ io.on('connection', (socket) => {
     });
 });
 
-// MongoDB কানেকশন (সব জায়গায় MONGO_URI ব্যবহার করা হলো)
+// MongoDB কানেকশন (সঠিক ইউজারনেম দিয়ে আপডেট করা)
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.31oqbfe.mongodb.net/?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
-    .catch((err) => console.log('❌ DB Connection Error:', err));
+    .catch((err) => {
+        console.log('❌ DB Connection Error:', err.message);
+    });
 
 // পোর্ট সেটআপ (রেলওয়ে এটি অটো-ম্যানেজ করবে)
 const PORT = process.env.PORT || 5001;
