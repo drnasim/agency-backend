@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Employee = require('../models/Employee');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs'); // পাসওয়ার্ড সিকিউর করার জন্য এটা যোগ করা হলো
 
 // সব এডিটরদের লিস্ট দেখার API
 router.get('/', async (req, res) => {
@@ -30,7 +31,7 @@ router.post('/', async (req, res) => {
     }
 });
 
-// এডিটরের ডিটেইলস ও পাসওয়ার্ড আপডেট করার API (নতুন যোগ করা হলো)
+// এডিটরের ডিটেইলস ও পাসওয়ার্ড আপডেট করার API
 router.put('/:id', async (req, res) => {
     try {
         const { name, email, position, salary, password, oldEmail } = req.body;
@@ -49,9 +50,11 @@ router.put('/:id', async (req, res) => {
             if (User) {
                 let updateData = { name, email };
                 
-                // যদি অ্যাডমিন নতুন পাসওয়ার্ড দেয়, তাহলে সেটাও আপডেট হবে
+                // যদি অ্যাডমিন নতুন পাসওয়ার্ড দেয়, তাহলে সেটা হ্যাশ করে সেভ করতে হবে
                 if (password && password.trim() !== '') {
-                    updateData.password = password; 
+                    const salt = await bcrypt.genSalt(10);
+                    const hashedPassword = await bcrypt.hash(password, salt);
+                    updateData.password = hashedPassword; // সিকিউর পাসওয়ার্ড সেভ হলো
                 }
 
                 await User.findOneAndUpdate({ email: oldEmail || email }, updateData);

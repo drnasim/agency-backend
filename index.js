@@ -58,7 +58,7 @@ io.on('connection', (socket) => {
 // MongoDB কানেকশন (Environment Variable + Fallback)
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://nasimsarkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.3iqgbfe.mongodb.net/?retryWrites=true&w=majority&appName=fortivus-group-llc";
 
-mongoose.connect(MONGODB_URI)
+mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
     .catch((err) => console.log('❌ DB Connection Error:', err));
 

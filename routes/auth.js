@@ -12,11 +12,11 @@ router.post('/register', async (req, res) => {
             return res.status(400).json({ error: "এই ইমেইলটি অলরেডি অন্য আইডিতে ব্যবহার করা হচ্ছে!" });
         }
 
-        // ২. ফোন নাম্বার ডুপ্লিকেট চেক (যদি দিয়ে থাকে)
+        // ২. ফোন নাম্বার ডুপ্লিকেট চেক (যদি দিয়ে থাকে)
         if (req.body.phone) {
             const existingPhone = await User.findOne({ phone: req.body.phone });
             if (existingPhone) {
-                return res.status(400).json({ error: "এই ফোন নাম্বারটি অলরেডি অন্য কারো আইডিতে দেওয়া আছে!" });
+                return res.status(400).json({ error: "এই ফোন নাম্বারটি অলরেডি অন্য কারো আইডিতে দেওয়া আছে!" });
             }
         }
 
@@ -47,20 +47,18 @@ router.post('/login', async (req, res) => {
     try {
         let user = await User.findOne({ email: req.body.email });
 
-        // সুপার অ্যাডমিন লগিন বাইপাস এবং ডাটাবেসে সেভ করা (যাতে প্রোফাইল এডিট করা যায়)
-        if (req.body.email === 'admin@agency.com' && (req.body.password === 'admin123' || req.body.password === 'password123')) {
-            if (!user) {
-                const salt = await bcrypt.genSalt(10);
-                const hashed = await bcrypt.hash('admin123', salt);
-                user = new User({ 
-                    name: 'MD NASIM SARKER', 
-                    email: 'admin@agency.com', 
-                    password: hashed, 
-                    role: 'Admin',
-                    gender: 'Male'
-                });
-                await user.save();
-            }
+        // অ্যাডমিন অ্যাকাউন্ট না থাকলে ফার্স্ট টাইমের জন্য তৈরি করবে
+        if (!user && req.body.email === 'admin@agency.com' && (req.body.password === 'admin123' || req.body.password === 'password123')) {
+            const salt = await bcrypt.genSalt(10);
+            const hashed = await bcrypt.hash(req.body.password, salt);
+            user = new User({ 
+                name: 'MD NASIM SARKER', 
+                email: 'admin@agency.com', 
+                password: hashed, 
+                role: 'Admin',
+                gender: 'Male'
+            });
+            await user.save();
             return res.status(200).json({ name: user.name, email: user.email, role: user.role });
         }
 
@@ -97,7 +95,7 @@ router.put('/update', async (req, res) => {
         const user = await User.findOne({ email: currentEmail });
         if (!user) return res.status(404).json({ error: "User not found!" });
 
-        // আপডেট করার সময় ফোন নাম্বার ইউনিক কি না সেটা চেক করা
+        // আপডেট করার সময় ফোন নাম্বার ইউনিক কি না সেটা চেক করা
         if (phone && phone !== user.phone) {
             const existingPhone = await User.findOne({ phone: phone });
             if (existingPhone) {
