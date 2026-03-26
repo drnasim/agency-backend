@@ -20,7 +20,7 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// হোম রুট (যাতে ব্রাউজারে Cannot GET / না দেখায়)
+// হোম রুট (যাতে ব্রাউজারে Cannot GET / না দেখায়)
 app.get('/', (req, res) => {
     res.send('🚀 Fortivus Group Agency Server is running and healthy!');
 });
@@ -42,9 +42,19 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/drive', driveRoutes);
 app.use('/api/chat', chatRoutes);
 
+// অনলাইন ইউজারদের ট্র্যাক করার জন্য Map (নতুন যোগ করা হয়েছে)
+const onlineUsers = new Map();
+
 // ================= Socket.io রিয়েল-টাইম ইভেন্ট =================
 io.on('connection', (socket) => {
     console.log(`🔌 User connected: ${socket.id}`);
+
+    // ইউজার কানেক্ট হলে তাকে অনলাইন লিস্টে অ্যাড করা এবং সবাইকে জানানো
+    socket.on('user_connected', (userName) => {
+        onlineUsers.set(socket.id, userName);
+        io.emit('online_users', Array.from(onlineUsers.values()));
+        console.log(`✅ User ${userName} is now online`);
+    });
 
     socket.on('join_room', (data) => {
         socket.join(data);
@@ -57,11 +67,14 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         console.log(`🚫 User disconnected: ${socket.id}`);
+        // ইউজার বের হয়ে গেলে অনলাইন লিস্ট থেকে রিমুভ করা এবং সবাইকে জানানো
+        onlineUsers.delete(socket.id);
+        io.emit('online_users', Array.from(onlineUsers.values()));
     });
 });
 
-// MongoDB কানেকশন (নতুন পাসওয়ার্ড দিয়ে আপডেট করা)
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:AgencyNasim2026@fortivus-group-llc.31oqbfe.mongodb.net/?retryWrites=true&w=majority";
+// MongoDB কানেকশন (সঠিক ক্লাস্টার আইডি 3iqgbfe ব্যবহার করা হয়েছে)
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:AgencyNasim2026@fortivus-group-llc.3iqgbfe.mongodb.net/?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
