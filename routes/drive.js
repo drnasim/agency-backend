@@ -3,7 +3,6 @@ const router = express.Router();
 const multer = require('multer');
 const { google } = require('googleapis');
 const stream = require('stream');
-// const Settings = require('../models/Settings'); // Railway-এর জন্য আগে থেকেই ছোট হাতের 's' করে দেওয়া হলো
 
 // মেমোরিতে ফাইল রাখার জন্য multer সেটআপ
 const upload = multer({ storage: multer.memoryStorage() });
@@ -13,7 +12,6 @@ const upload = multer({ storage: multer.memoryStorage() });
 // ==============================================================
 async function getOrCreateFolder(drive, folderName, parentFolderId) {
     try {
-        // ১. চেক করবে এই নামে কোনো ফোল্ডার আছে কি না
         const query = `mimeType='application/vnd.google-apps.folder' and name='${folderName}' and trashed=false ${parentFolderId ? `and '${parentFolderId}' in parents` : ''}`;
         
         const response = await drive.files.list({
@@ -23,10 +21,9 @@ async function getOrCreateFolder(drive, folderName, parentFolderId) {
         });
 
         if (response.data.files.length > 0) {
-            return response.data.files[0].id; // ফোল্ডার পেলে তার আইডি রিটার্ন করবে
+            return response.data.files[0].id;
         }
 
-        // ২. না পেলে অটোমেটিক নতুন ফোল্ডার ক্রিয়েট করবে
         const fileMetadata = {
             name: folderName,
             mimeType: 'application/vnd.google-apps.folder',
@@ -49,7 +46,6 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     try {
         const file = req.file;
         
-        // ফ্রন্টএন্ড থেকে ক্লায়েন্টের নাম এবং প্রজেক্টের নাম রিসিভ করা (না থাকলে ডিফল্ট নাম বসবে)
         const clientName = req.body.clientName || 'General_Clients';
         const projectName = req.body.projectName || 'Uncategorized_Files'; 
 
@@ -58,15 +54,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         }
 
         // ==============================================================
-        // Google Drive API আপলোড ও ফোল্ডার লজিক
+        // Google Drive API রিয়েল আপলোড লজিক (Securely using process.env)
         // ==============================================================
-        
-        // নোট: গুগল ড্রাইভে সার্ভার থেকে ফাইল আপলোড করার জন্য Client ID এবং Secret এর পাশাপাশি একটি Refresh Token লাগে।
-        // যেহেতু আপাতত সিস্টেমে Refresh Token নেই, আমি মূল লজিকটা রেডি করে রাখছি। 
-        // আপনি ভবিষ্যতে .env তে Refresh Token বসালেই এটা ১০০% রিয়েল ড্রাইভে ফোল্ডার বানিয়ে আপলোড করবে।
-        // আপাতত আপনার ফ্রন্টএন্ডের কাজ চালিয়ে নেওয়ার জন্য একটা জেনারেটেড ডেমো লিংক রিটার্ন করছি।
-
-        /* const oauth2Client = new google.auth.OAuth2(
+        const oauth2Client = new google.auth.OAuth2(
             process.env.DRIVE_CLIENT_ID,
             process.env.DRIVE_CLIENT_SECRET,
             "https://developers.google.com/oauthplayground"
@@ -74,39 +64,30 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         oauth2Client.setCredentials({ refresh_token: process.env.DRIVE_REFRESH_TOKEN });
         const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-        const MAIN_ROOT_FOLDER_ID = process.env.DRIVE_MAIN_FOLDER_ID; // আপনার ড্রাইভের মূল ফোল্ডার আইডি
+        const MAIN_ROOT_FOLDER_ID = process.env.DRIVE_MAIN_FOLDER_ID;
 
-        // ধাপ ১: ক্লায়েন্টের নামে ফোল্ডার তৈরি বা সিলেক্ট করা
         const clientFolderId = await getOrCreateFolder(drive, clientName, MAIN_ROOT_FOLDER_ID);
-
-        // ধাপ ২: প্রজেক্টের নামে ফোল্ডার তৈরি বা সিলেক্ট করা
         const projectFolderId = await getOrCreateFolder(drive, projectName, clientFolderId);
 
-        // ধাপ ৩: নির্দিষ্ট প্রজেক্ট ফোল্ডারে ফাইল আপলোড করা
         const bufferStream = new stream.PassThrough();
         bufferStream.end(file.buffer);
         
         const response = await drive.files.create({
             requestBody: {
                 name: file.originalname,
-                parents: [projectFolderId] // একদম প্রজেক্ট ফোল্ডারে সেভ হবে
+                parents: [projectFolderId] 
             },
             media: {
                 mimeType: file.mimetype,
                 body: bufferStream
             }
         });
+        
         const fileUrl = `https://drive.google.com/file/d/${response.data.id}/view`;
         
-        return res.status(200).json({ message: "File uploaded successfully!", fileUrl: fileUrl });
-        */
-
-        // ডেমো রেসপন্স (যাতে প্রজেক্ট ক্রিয়েট করার সময় কোনো এরর না আসে)
-        const demoFileUrl = `https://drive.google.com/file/d/Folder_${clientName}_${Math.floor(Math.random() * 10000)}/view`;
-
-        res.status(200).json({ 
-            message: "File logic sorted and uploaded successfully!", 
-            fileUrl: demoFileUrl 
+        return res.status(200).json({ 
+            message: "File uploaded successfully to Google Drive!", 
+            fileUrl: fileUrl 
         });
 
     } catch (err) {
