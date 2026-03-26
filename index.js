@@ -20,6 +20,11 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
+// হোম রুট (যাতে ব্রাউজারে Cannot GET / না দেখায়)
+app.get('/', (req, res) => {
+    res.send('🚀 Fortivus Group Agency Server is running and healthy!');
+});
+
 // Routes কানেক্ট করা
 const projectRoutes = require('./routes/projects');
 const clientRoutes = require('./routes/clients');
@@ -55,8 +60,8 @@ io.on('connection', (socket) => {
     });
 });
 
-// MongoDB কানেকশন (সঠিক 31oqbfe আইডি ব্যবহার করা হয়েছে)
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.31oqbfe.mongodb.net/?retryWrites=true&w=majority";
+// MongoDB কানেকশন (নতুন পাসওয়ার্ড দিয়ে আপডেট করা)
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:AgencyNasim2026@fortivus-group-llc.31oqbfe.mongodb.net/?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
@@ -65,7 +70,7 @@ mongoose.connect(MONGO_URI)
     });
 
 // পোর্ট সেটআপ (রেলওয়ে এটি অটো-ম্যানেজ করবে)
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
