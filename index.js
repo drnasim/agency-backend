@@ -55,8 +55,8 @@ io.on('connection', (socket) => {
     });
 });
 
-// MongoDB কানেকশন (সঠিক ইউজারনেম nasimsharkarofficial_db_user দিয়ে আপডেট করা)
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.3iqgbfe.mongodb.net/?retryWrites=true&w=majority";
+// MongoDB কানেকশন (সঠিক 31oqbfe আইডি ব্যবহার করা হয়েছে)
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.31oqbfe.mongodb.net/?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
