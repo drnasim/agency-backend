@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const { google } = require('googleapis');
 const stream = require('stream');
-// const Settings = require('../models/Settings'); // যদি ডাটাবেস থেকে কনফিগ আনেন
+// const Settings = require('../models/settings'); // Railway-এর জন্য আগে থেকেই ছোট হাতের 's' করে দেওয়া হলো
 
 // মেমোরিতে ফাইল রাখার জন্য multer সেটআপ
 const upload = multer({ storage: multer.memoryStorage() });
@@ -26,7 +26,7 @@ async function getOrCreateFolder(drive, folderName, parentFolderId) {
             return response.data.files[0].id; // ফোল্ডার পেলে তার আইডি রিটার্ন করবে
         }
 
-        // ২. না পেলে অটোমেটিক নতুন ফোল্ডার ক্রিয়েট করবে
+        // ২. না পেলে অটোমেটিক নতুন ফোল্ডার ক্রিয়েট করবে
         const fileMetadata = {
             name: folderName,
             mimeType: 'application/vnd.google-apps.folder',
@@ -49,7 +49,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     try {
         const file = req.file;
         
-        // ফ্রন্টএন্ড থেকে ক্লায়েন্টের নাম এবং প্রজেক্টের নাম রিসিভ করা (না থাকলে ডিফল্ট নাম বসবে)
+        // ফ্রন্টএন্ড থেকে ক্লায়েন্টের নাম এবং প্রজেক্টের নাম রিসিভ করা (না থাকলে ডিফল্ট নাম বসবে)
         const clientName = req.body.clientName || 'General_Clients';
         const projectName = req.body.projectName || 'Uncategorized_Files'; 
 
@@ -63,7 +63,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         
         // নোট: গুগল ড্রাইভে সার্ভার থেকে ফাইল আপলোড করার জন্য Client ID এবং Secret এর পাশাপাশি একটি Refresh Token লাগে।
         // যেহেতু আপাতত সিস্টেমে Refresh Token নেই, আমি মূল লজিকটা রেডি করে রাখছি। 
-        // আপনি ভবিষ্যতে .env তে Refresh Token বসালেই এটা ১০০% রিয়েল ড্রাইভে ফোল্ডার বানিয়ে আপলোড করবে।
+        // আপনি ভবিষ্যতে .env তে Refresh Token বসালেই এটা ১০০% রিয়েল ড্রাইভে ফোল্ডার বানিয়ে আপলোড করবে।
         // আপাতত আপনার ফ্রন্টএন্ডের কাজ চালিয়ে নেওয়ার জন্য একটা জেনারেটেড ডেমো লিংক রিটার্ন করছি।
 
         /* const oauth2Client = new google.auth.OAuth2(
@@ -76,7 +76,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
         const MAIN_ROOT_FOLDER_ID = process.env.DRIVE_MAIN_FOLDER_ID; // আপনার ড্রাইভের মূল ফোল্ডার আইডি
 
-        // ধাপ ১: ক্লায়েন্টের নামে ফোল্ডার তৈরি বা সিলেক্ট করা
+        // ধাপ ১: ক্লায়েন্টের নামে ফোল্ডার তৈরি বা সিলেক্ট করা
         const clientFolderId = await getOrCreateFolder(drive, clientName, MAIN_ROOT_FOLDER_ID);
 
         // ধাপ ২: প্রজেক্টের নামে ফোল্ডার তৈরি বা সিলেক্ট করা
