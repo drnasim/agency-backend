@@ -55,8 +55,8 @@ io.on('connection', (socket) => {
     });
 });
 
-// MongoDB কানেকশন (Environment Variable + Fallback)
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://nasimsarkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.3iqgbfe.mongodb.net/?retryWrites=true&w=majority&appName=fortivus-group-llc";
+// MongoDB কানেকশন (সব জায়গায় MONGO_URI ব্যবহার করা হলো)
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:sDUSwq2Ds1y6MSUSA@fortivus-group-llc.31oqbfe.mongodb.net/?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB is Connected Successfully!'))
