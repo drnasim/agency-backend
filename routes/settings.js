@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const Settings = require('../models/settings'); // Railway-এর এরর এড়াতে ছোট হাতের 's' করা হলো
+const Settings = require('../models/Settings'); // Railway-এর এরর এড়াতে ছোট হাতের 's' করা হলো
 
 // ডাটাবেস থেকে পেমেন্ট মেথডগুলো দেখার API
 router.get('/payments', async (req, res) => {

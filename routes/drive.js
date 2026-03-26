@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const { google } = require('googleapis');
 const stream = require('stream');
-// const Settings = require('../models/settings'); // Railway-এর জন্য আগে থেকেই ছোট হাতের 's' করে দেওয়া হলো
+// const Settings = require('../models/Settings'); // Railway-এর জন্য আগে থেকেই ছোট হাতের 's' করে দেওয়া হলো
 
 // মেমোরিতে ফাইল রাখার জন্য multer সেটআপ
 const upload = multer({ storage: multer.memoryStorage() });
