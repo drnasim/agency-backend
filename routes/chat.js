@@ -17,7 +17,7 @@ router.get('/rooms/:username', async (req, res) => {
     }
 });
 
-// নতুন গ্রুপ বা প্রাইভেট চ্যাট (রুম) ক্রিয়েট করার API
+// নতুন গ্রুপ বা প্রাইভেট চ্যাট (রুম) ক্রিয়েট করার API
 router.post('/rooms', async (req, res) => {
     try {
         const { name, isGroup, members, createdBy } = req.body;
@@ -52,7 +52,7 @@ router.post('/rooms', async (req, res) => {
 // নির্দিষ্ট কোনো রুম বা গ্রুপের আগের সব মেসেজ তুলে আনার API
 router.get('/:room', async (req, res) => {
     try {
-        // Express যেন "rooms" শব্দটাকে :room হিসেবে না ধরে, তাই এটা নিচে রাখা হয়েছে
+        // Express যেন "rooms" শব্দটাকে :room হিসেবে না ধরে, তাই এটা নিচে রাখা হয়েছে
         if (req.params.room === 'rooms') return res.status(400).send('Invalid room id');
 
         const messages = await Message.find({ room: req.params.room }).sort({ createdAt: 1 });
@@ -74,6 +74,32 @@ router.post('/', async (req, res) => {
         });
         
         const savedMessage = await newMessage.save();
+
+        // ================= Push Notification Logic =================
+        if (global.sendPushNotification) {
+            // কোন রুমে মেসেজ এসেছে সেটা ডাটাবেস থেকে খুঁজে বের করা
+            const roomData = await Room.findById(req.body.room);
+            
+            if (roomData && roomData.members) {
+                // নোটিফিকেশনে মেসেজের প্রিভিউ বা ফাইলের কথা দেখানোর জন্য
+                let previewText = req.body.text 
+                                  ? (req.body.text.length > 30 ? req.body.text.substring(0, 30) + '...' : req.body.text)
+                                  : 'Sent a file/attachment 📎';
+
+                // রুমের সব মেম্বারকে লুপ করে চেক করা
+                roomData.members.forEach(member => {
+                    // যে মেসেজ পাঠিয়েছে, তাকে নিজের মেসেজের নোটিফিকেশন তো আর দেওয়া যাবে না!
+                    if (member !== req.body.sender) {
+                        global.sendPushNotification(member, {
+                            title: roomData.isGroup ? `New message in ${roomData.name} 💬` : `New message from ${req.body.sender}`,
+                            body: roomData.isGroup ? `${req.body.sender}: ${previewText}` : previewText
+                        });
+                    }
+                });
+            }
+        }
+        // =========================================================
+
         res.status(201).json(savedMessage);
     } catch (err) {
         res.status(500).json({ error: err.message });
