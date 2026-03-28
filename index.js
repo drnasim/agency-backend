@@ -23,7 +23,7 @@ const PushSubscription = mongoose.model('PushSubscription', subscriptionSchema);
 global.sendPushNotification = async (userName, payload) => {
     try {
         const subs = await PushSubscription.find({ userName });
-        if (subs.length === 0) return; // ইউজার সাবস্ক্রাইব না করে থাকলে বাদ
+        if (subs.length === 0) return; 
 
         const promises = subs.map(sub => {
             return webpush.sendNotification(sub.subscription, JSON.stringify(payload)).catch(err => {
@@ -109,25 +109,27 @@ io.on('connection', (socket) => {
     });
 
     socket.on('join_room', (data) => {
-        socket.join(data);
+        if (data) {
+            socket.join(data);
+            console.log(`User ${currentUserName || socket.id} joined room: ${data}`);
+        }
     });
 
-    // চ্যাটে মেসেজ পাঠানো এবং সাথে সাথে পুশ নোটিফিকেশন ফায়ার করা
     socket.on('send_message', async (data) => {
-        socket.to(data.room).emit('receive_message', data);
+        if (data && data.room) {
+            socket.to(data.room).emit('receive_message', data);
+        }
         
-        // মেসেজ পাঠানোর পর ওই রুমের অন্য ইউজারদের কাছে নোটিফিকেশন পাঠানো
         try {
             const ChatRoom = mongoose.model('ChatRoom'); 
             const room = await ChatRoom.findById(data.room);
             if (room) {
-                // যারা মেসেজ পাঠায়নি, শুধু তাদেরকেই নোটিফিকেশন পাঠাবে
                 const receivers = room.members.filter(m => m !== data.sender);
                 receivers.forEach(receiverName => {
                     const payload = {
                         title: `New Message from ${data.sender}`,
                         body: data.text || "Sent an attachment 📎",
-                        url: "/dashboard" // ক্লিক করলে ড্যাশবোর্ডে নিয়ে যাবে
+                        url: "/dashboard" 
                     };
                     global.sendPushNotification(receiverName, payload);
                 });
@@ -141,46 +143,60 @@ io.on('connection', (socket) => {
     
     // ১. রিং বাজানোর সিগন্যাল
     socket.on('call_user', (data) => {
-        socket.to(data.room).emit('incoming_call', {
-            callerName: data.callerName,
-            isVideo: data.isVideo,
-            isGroup: data.isGroup 
-        });
-        
-        // কল দিলেও একটা নোটিফিকেশন পাঠানো যায় (ঐচ্ছিক)
-        try {
-            const payload = {
-                title: `Incoming ${data.isVideo ? 'Video' : 'Audio'} Call`,
-                body: `${data.callerName} is calling you...`,
-                url: "/dashboard"
-            };
-            // ডাটাবেস থেকে রিসিভারের নাম বের করতে হবে, আপাতত শুধু সিগন্যাল পাঠালাম
-        } catch(e) {}
+        if (data && data.room) {
+            console.log(`Calling in room: ${data.room}`);
+            socket.to(data.room).emit('incoming_call', {
+                callerName: data.callerName,
+                isVideo: data.isVideo,
+                isGroup: data.isGroup,
+                room: data.room 
+            });
+            
+            try {
+                const payload = {
+                    title: `Incoming ${data.isVideo ? 'Video' : 'Audio'} Call`,
+                    body: `${data.callerName} is calling you...`,
+                    url: "/dashboard"
+                };
+            } catch(e) {}
+        }
     });
 
     // ২. কল রিসিভ করার সিগন্যাল
     socket.on('answer_call', (data) => {
-        socket.to(data.room).emit('call_accepted', data.signal);
+        if (data && data.room) {
+            console.log(`Call answered in room: ${data.room}`);
+            socket.to(data.room).emit('call_accepted', data.signal);
+        }
     });
 
     // ৩. WebRTC Offer (যে কল রিসিভ করেছে তার কাছে যাবে)
     socket.on('webrtc_offer', (data) => {
-        socket.to(data.room).emit('webrtc_offer', data);
+        if (data && data.room) {
+            socket.to(data.room).emit('webrtc_offer', data);
+        }
     });
 
     // ৪. WebRTC Answer (যে কল করেছে তার কাছে যাবে)
     socket.on('webrtc_answer', (data) => {
-        socket.to(data.room).emit('webrtc_answer', data);
+        if (data && data.room) {
+            socket.to(data.room).emit('webrtc_answer', data);
+        }
     });
 
     // ৫. ICE Candidate (পিয়ার-টু-পিয়ার নেটওয়ার্ক কানেকশন)
     socket.on('webrtc_ice_candidate', (data) => {
-        socket.to(data.room).emit('webrtc_ice_candidate', data);
+        if (data && data.room) {
+            socket.to(data.room).emit('webrtc_ice_candidate', data);
+        }
     });
 
     // ৬. কল এন্ড
     socket.on('end_call', (data) => {
-        socket.to(data.room).emit('call_ended');
+        if (data && data.room) {
+            console.log(`Call ended by user in room: ${data.room}`);
+            socket.to(data.room).emit('call_ended');
+        }
     });
 
     socket.on('disconnect', () => {
