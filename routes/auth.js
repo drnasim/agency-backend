@@ -13,7 +13,7 @@ router.post('/register', async (req, res) => {
         }
 
         // ২. ফোন নাম্বার ডুপ্লিকেট চেক (যদি দিয়ে থাকে)
-        if (req.body.phone) {
+        if (req.body.phone && req.body.phone.trim() !== "") {
             const existingPhone = await User.findOne({ phone: req.body.phone });
             if (existingPhone) {
                 return res.status(400).json({ error: "এই ফোন নাম্বারটি অলরেডি অন্য কারো আইডিতে দেওয়া আছে!" });
@@ -96,7 +96,7 @@ router.put('/update', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found!" });
 
         // আপডেট করার সময় ফোন নাম্বার ইউনিক কি না সেটা চেক করা
-        if (phone && phone !== user.phone) {
+        if (phone && phone.trim() !== "" && phone !== user.phone) {
             const existingPhone = await User.findOne({ phone: phone });
             if (existingPhone) {
                 return res.status(400).json({ error: "এই ফোন নাম্বারটি অলরেডি অন্য একজন ব্যবহার করছে!" });
@@ -108,15 +108,15 @@ router.put('/update', async (req, res) => {
         if (phone !== undefined) user.phone = phone;
         if (dob !== undefined) user.dob = dob;
         if (gender !== undefined) user.gender = gender;
-        if (profilePic !== undefined) user.profilePic = profilePic;
+        if (profilePic !== undefined && profilePic !== "") user.profilePic = profilePic;
         
-        if (newPassword) {
+        if (newPassword && newPassword.trim() !== "") {
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(newPassword, salt);
         }
 
         const updatedUser = await user.save();
-        res.status(200).json({ message: "Profile updated successfully!", name: updatedUser.name, email: updatedUser.email, role: updatedUser.role });
+        res.status(200).json({ message: "Profile updated successfully!", name: updatedUser.name, email: updatedUser.email, role: updatedUser.role, profilePic: updatedUser.profilePic });
     } catch (err) {
         console.error("Update Error:", err);
         if (err.code === 11000) {
