@@ -139,66 +139,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ================= WebRTC Call Signaling =================
-    
-    // ১. রিং বাজানোর সিগন্যাল
-    socket.on('call_user', (data) => {
-        if (data && data.room) {
-            console.log(`Calling in room: ${data.room}`);
-            socket.to(data.room).emit('incoming_call', {
-                callerName: data.callerName,
-                isVideo: data.isVideo,
-                isGroup: data.isGroup,
-                room: data.room 
-            });
-            
-            try {
-                const payload = {
-                    title: `Incoming ${data.isVideo ? 'Video' : 'Audio'} Call`,
-                    body: `${data.callerName} is calling you...`,
-                    url: "/dashboard"
-                };
-            } catch(e) {}
-        }
-    });
-
-    // ২. কল রিসিভ করার সিগন্যাল
-    socket.on('answer_call', (data) => {
-        if (data && data.room) {
-            console.log(`Call answered in room: ${data.room}`);
-            socket.to(data.room).emit('call_accepted', data.signal);
-        }
-    });
-
-    // ৩. WebRTC Offer (যে কল রিসিভ করেছে তার কাছে যাবে)
-    socket.on('webrtc_offer', (data) => {
-        if (data && data.room) {
-            socket.to(data.room).emit('webrtc_offer', data);
-        }
-    });
-
-    // ৪. WebRTC Answer (যে কল করেছে তার কাছে যাবে)
-    socket.on('webrtc_answer', (data) => {
-        if (data && data.room) {
-            socket.to(data.room).emit('webrtc_answer', data);
-        }
-    });
-
-    // ৫. ICE Candidate (পিয়ার-টু-পিয়ার নেটওয়ার্ক কানেকশন)
-    socket.on('webrtc_ice_candidate', (data) => {
-        if (data && data.room) {
-            socket.to(data.room).emit('webrtc_ice_candidate', data);
-        }
-    });
-
-    // ৬. কল এন্ড
-    socket.on('end_call', (data) => {
-        if (data && data.room) {
-            console.log(`Call ended by user in room: ${data.room}`);
-            socket.to(data.room).emit('call_ended');
-        }
-    });
-
     socket.on('disconnect', () => {
         console.log(`🚫 User disconnected: ${socket.id}`);
         if (currentUserName) {
