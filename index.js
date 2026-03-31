@@ -84,6 +84,7 @@ const authRoutes = require('./routes/auth');
 const settingsRoutes = require('./routes/settings');
 const driveRoutes = require('./routes/drive');
 const chatRoutes = require('./routes/chat');
+const financeRoutes = require('./routes/finance'); // <--- New Line added
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -92,6 +93,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/drive', driveRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/finance', financeRoutes); // <--- New Line added
 
 const onlineUsers = new Map();
 
