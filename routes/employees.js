@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Employee = require('../models/Employee');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); // পাসওয়ার্ড সিকিউর করার জন্য এটা যোগ করা হলো
+const bcrypt = require('bcryptjs'); // পাসওয়ার্ড সিকিউর করার জন্য এটা যোগ করা হলো
 
 // সব এডিটরদের লিস্ট দেখার API
 router.get('/', async (req, res) => {
@@ -17,14 +17,40 @@ router.get('/', async (req, res) => {
 // নতুন এডিটর অ্যাড করার API
 router.post('/', async (req, res) => {
     try {
+        const { name, email, position, salary, password, role } = req.body;
+
         const newEmployee = new Employee({
-            name: req.body.name,
-            email: req.body.email,
-            position: req.body.position,
-            salary: Number(req.body.salary) || 0 
+            name,
+            email,
+            position,
+            salary: Number(salary) || 0,
+            role: role || 'Editor' // ডিফল্ট হিসেবে Editor
         });
         
         const savedEmployee = await newEmployee.save();
+
+        // User (অথেনটিকেশন) মডেলেও ডেটা সেভ করা
+        try {
+            const User = mongoose.models.User || mongoose.model('User');
+            if (User) {
+                const existingUser = await User.findOne({ email });
+                if (!existingUser) {
+                    const salt = await bcrypt.genSalt(10);
+                    // যদি পাসওয়ার্ড না দেওয়া হয়, তবে 123456 ডিফল্ট হিসেবে সেট হবে
+                    const hashedPassword = await bcrypt.hash(password || '123456', salt); 
+                    const newUser = new User({
+                        name,
+                        email,
+                        password: hashedPassword,
+                        role: role || 'Editor'
+                    });
+                    await newUser.save();
+                }
+            }
+        } catch (authError) {
+            console.log("User creation failed in Auth model:", authError.message);
+        }
+
         res.status(201).json(savedEmployee);
     } catch (err) { 
         res.status(500).json({ error: err.message }); 
@@ -34,12 +60,12 @@ router.post('/', async (req, res) => {
 // এডিটরের ডিটেইলস ও পাসওয়ার্ড আপডেট করার API
 router.put('/:id', async (req, res) => {
     try {
-        const { name, email, position, salary, password, oldEmail } = req.body;
+        const { name, email, position, salary, password, oldEmail, role } = req.body;
         
         // ১. ড্যাশবোর্ডের Employee কালেকশন আপডেট
         const updatedEmployee = await Employee.findByIdAndUpdate(
             req.params.id, 
-            { name, email, position, salary: Number(salary) || 0 }, 
+            { name, email, position, salary: Number(salary) || 0, role: role || 'Editor' }, 
             { new: true }
         );
 
@@ -48,13 +74,13 @@ router.put('/:id', async (req, res) => {
             // আমরা ধরে নিচ্ছি আপনার অথেনটিকেশন মডেলের নাম 'User'
             const User = mongoose.models.User || mongoose.model('User');
             if (User) {
-                let updateData = { name, email };
+                let updateData = { name, email, role: role || 'Editor' };
                 
                 // যদি অ্যাডমিন নতুন পাসওয়ার্ড দেয়, তাহলে সেটা হ্যাশ করে সেভ করতে হবে
                 if (password && password.trim() !== '') {
                     const salt = await bcrypt.genSalt(10);
                     const hashedPassword = await bcrypt.hash(password, salt);
-                    updateData.password = hashedPassword; // সিকিউর পাসওয়ার্ড সেভ হলো
+                    updateData.password = hashedPassword; // সিকিউর পাসওয়ার্ড সেভ হলো
                 }
 
                 await User.findOneAndUpdate({ email: oldEmail || email }, updateData);

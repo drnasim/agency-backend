@@ -17,6 +17,11 @@ const employeeSchema = new mongoose.Schema({
     salary: { 
         type: Number, 
         default: 0 
+    },
+    role: {
+        type: String,
+        enum: ['Admin', 'Editor'],
+        default: 'Editor'
     }
 }, { timestamps: true });
 
