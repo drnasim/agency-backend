@@ -4,10 +4,15 @@ const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    role: { type: String, enum: ['Admin', 'Editor'], default: 'Editor' },
+
+    // ✅ role এখন array — একজন ইউজার একসাথে Admin ও Editor দুটোই হতে পারবে
+    role: { 
+        type: [String], 
+        enum: ['Admin', 'Editor'], 
+        default: ['Editor'] 
+    },
     
-    // নতুন অ্যাড করা প্রোফাইল ফিল্ডগুলো
-    phone: { type: String, unique: true, sparse: true }, // ইউনিক করা হলো
+    phone: { type: String, unique: true, sparse: true },
     dob: { type: String, default: '' },
     gender: { type: String, enum: ['Male', 'Female'], default: 'Male' },
     profilePic: { type: String, default: '' }

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Employee = require('../models/Employee');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); // পাসওয়ার্ড সিকিউর করার জন্য এটা যোগ করা হলো
+const bcrypt = require('bcryptjs');
 
 // সব এডিটরদের লিস্ট দেখার API
 router.get('/', async (req, res) => {
@@ -31,10 +31,10 @@ router.post('/', async (req, res) => {
     }
 });
 
-// এডিটরের ডিটেইলস ও পাসওয়ার্ড আপডেট করার API
+// এডিটরের ডিটেইলস, রোল ও পাসওয়ার্ড আপডেট করার API
 router.put('/:id', async (req, res) => {
     try {
-        const { name, email, position, salary, password, oldEmail } = req.body;
+        const { name, email, position, salary, password, oldEmail, roles } = req.body;
         
         // ১. ড্যাশবোর্ডের Employee কালেকশন আপডেট
         const updatedEmployee = await Employee.findByIdAndUpdate(
@@ -45,22 +45,30 @@ router.put('/:id', async (req, res) => {
 
         // ২. লগিন করার User/Auth কালেকশন আপডেট
         try {
-            // আমরা ধরে নিচ্ছি আপনার অথেনটিকেশন মডেলের নাম 'User'
             const User = mongoose.models.User || mongoose.model('User');
             if (User) {
                 let updateData = { name, email };
+
+                // ✅ roles array আপডেট করা হচ্ছে
+                if (roles && Array.isArray(roles) && roles.length > 0) {
+                    updateData.role = roles;
+                }
                 
                 // যদি অ্যাডমিন নতুন পাসওয়ার্ড দেয়, তাহলে সেটা হ্যাশ করে সেভ করতে হবে
                 if (password && password.trim() !== '') {
                     const salt = await bcrypt.genSalt(10);
                     const hashedPassword = await bcrypt.hash(password, salt);
-                    updateData.password = hashedPassword; // সিকিউর পাসওয়ার্ড সেভ হলো
+                    updateData.password = hashedPassword;
                 }
 
-                await User.findOneAndUpdate({ email: oldEmail || email }, updateData);
+                await User.findOneAndUpdate(
+                    { email: oldEmail || email }, 
+                    updateData,
+                    { new: true }
+                );
             }
         } catch (authError) {
-            console.log("Auth User update skipped. Make sure your Auth model is named 'User'.");
+            console.log("Auth User update skipped:", authError.message);
         }
 
         res.status(200).json(updatedEmployee);

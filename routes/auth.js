@@ -22,19 +22,26 @@ router.post('/register', async (req, res) => {
 
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(req.body.password, salt);
+
+        // ✅ role সবসময় array হিসেবে সেভ হবে
+        let roleArray = req.body.role;
+        if (!roleArray) {
+            roleArray = ['Editor'];
+        } else if (typeof roleArray === 'string') {
+            roleArray = [roleArray];
+        }
         
         const newUser = new User({
             name: req.body.name,
             email: req.body.email,
             password: hashedPassword,
-            role: req.body.role || 'Editor',
+            role: roleArray,
             phone: req.body.phone || ''
         });
         
         const savedUser = await newUser.save();
         res.status(201).json(savedUser);
     } catch (err) {
-        // ডাটাবেস লেভেলের ডুপ্লিকেট এরর হ্যান্ডেলিং
         if (err.code === 11000) {
             return res.status(400).json({ error: "এই ইমেইল বা ফোন নাম্বার অলরেডি ব্যবহার করা হচ্ছে!" });
         }
@@ -55,11 +62,17 @@ router.post('/login', async (req, res) => {
                 name: 'MD NASIM SARKER', 
                 email: 'admin@agency.com', 
                 password: hashed, 
-                role: 'Admin',
+                role: ['Admin'],
                 gender: 'Male'
             });
             await user.save();
-            return res.status(200).json({ name: user.name, email: user.email, role: user.role });
+
+            return res.status(200).json({ 
+                name: user.name, 
+                email: user.email, 
+                role: user.role,        // ✅ array রিটার্ন
+                primaryRole: 'Admin'    // ✅ প্রাইমারি রোল আলাদা
+            });
         }
 
         if (!user) return res.status(404).json({ error: "User not found in database!" });
@@ -68,7 +81,18 @@ router.post('/login', async (req, res) => {
         const validPass = await bcrypt.compare(req.body.password, user.password);
         if (!validPass) return res.status(400).json({ error: "Wrong password!" });
 
-        res.status(200).json({ name: user.name, email: user.email, role: user.role });
+        // ✅ role array নিশ্চিত করা (পুরনো স্ট্রিং ডেটার জন্য backward compatibility)
+        const roleArray = Array.isArray(user.role) ? user.role : [user.role];
+
+        // ✅ primaryRole: Admin থাকলে Admin, না হলে Editor
+        const primaryRole = roleArray.includes('Admin') ? 'Admin' : 'Editor';
+
+        res.status(200).json({ 
+            name: user.name, 
+            email: user.email, 
+            role: roleArray,        // ✅ array রিটার্ন (সব রোল)
+            primaryRole: primaryRole // ✅ প্রাইমারি রোল (নেভিগেশন কন্ট্রোলের জন্য)
+        });
     } catch (err) {
         console.error("Login Error:", err);
         res.status(500).json({ error: err.message });
@@ -81,7 +105,11 @@ router.get('/me', async (req, res) => {
         const email = req.query.email;
         const user = await User.findOne({ email });
         if (!user) return res.status(404).json({ error: "User not found" });
-        res.status(200).json(user);
+
+        // ✅ role array নিশ্চিত করা
+        const roleArray = Array.isArray(user.role) ? user.role : [user.role];
+
+        res.status(200).json({ ...user.toObject(), role: roleArray });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -103,7 +131,6 @@ router.put('/update', async (req, res) => {
             }
         }
 
-        // সব ডেটা আপডেট
         if (name !== undefined) user.name = name;
         if (phone !== undefined) user.phone = phone;
         if (dob !== undefined) user.dob = dob;
@@ -116,7 +143,19 @@ router.put('/update', async (req, res) => {
         }
 
         const updatedUser = await user.save();
-        res.status(200).json({ message: "Profile updated successfully!", name: updatedUser.name, email: updatedUser.email, role: updatedUser.role, profilePic: updatedUser.profilePic });
+
+        // ✅ role array নিশ্চিত করা
+        const roleArray = Array.isArray(updatedUser.role) ? updatedUser.role : [updatedUser.role];
+        const primaryRole = roleArray.includes('Admin') ? 'Admin' : 'Editor';
+
+        res.status(200).json({ 
+            message: "Profile updated successfully!", 
+            name: updatedUser.name, 
+            email: updatedUser.email, 
+            role: roleArray,
+            primaryRole: primaryRole,
+            profilePic: updatedUser.profilePic 
+        });
     } catch (err) {
         console.error("Update Error:", err);
         if (err.code === 11000) {
