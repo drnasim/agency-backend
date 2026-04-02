@@ -41,10 +41,13 @@ global.sendPushNotification = async (userName, payload) => {
 
 const io = new Server(server, {
     cors: {
-        origin: "*", 
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
+
+// ✅ routes থেকে io access করার জন্য global এ expose করা
+global.io = io;
 
 app.use(cors());
 app.use(express.json());

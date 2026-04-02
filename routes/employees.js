@@ -62,10 +62,19 @@ router.put('/:id', async (req, res) => {
                 }
 
                 await User.findOneAndUpdate(
-                    { email: oldEmail || email }, 
+                    { email: oldEmail || email },
                     updateData,
                     { new: true }
                 );
+
+                // ✅ Role update হলে সেই user কে real-time এ notify করা
+                if (roles && Array.isArray(roles) && global.io) {
+                    global.io.emit('role_updated', {
+                        email: email,
+                        oldEmail: oldEmail || email,
+                        roles: roles
+                    });
+                }
             }
         } catch (authError) {
             console.log("Auth User update skipped:", authError.message);
