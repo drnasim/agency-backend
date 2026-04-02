@@ -1,10 +1,12 @@
-require('dotenv').config(); 
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const http = require('http'); 
-const { Server } = require('socket.io'); 
-const webpush = require('web-push'); 
+const http = require('http');
+const { Server } = require('socket.io');
+const webpush = require('web-push');
+const cron = require('node-cron');
+const EmailAccount = require('./models/EmailAccount');
 
 const app = express();
 const server = http.createServer(app); 
@@ -87,8 +89,9 @@ const authRoutes = require('./routes/auth');
 const settingsRoutes = require('./routes/settings');
 const driveRoutes = require('./routes/drive');
 const chatRoutes = require('./routes/chat');
-const financeRoutes = require('./routes/finance'); 
+const financeRoutes = require('./routes/finance');
 const uploadRoutes = require('./routes/upload'); // <--- Cloudflare R2 Upload Route
+const mailRoutes = require('./routes/mail');
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -97,8 +100,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/drive', driveRoutes);
 app.use('/api/chat', chatRoutes);
-app.use('/api/finance', financeRoutes); 
+app.use('/api/finance', financeRoutes);
 app.use('/api/upload', uploadRoutes); // <--- Cloudflare R2 Upload Route connected
+app.use('/api/mail', mailRoutes);
 
 const onlineUsers = new Map();
 
@@ -162,6 +166,16 @@ mongoose.connect(MONGO_URI)
     .catch((err) => {
         console.log('❌ DB Connection Error:', err.message);
     });
+
+// ====================== CRON: sentToday রিসেট প্রতিদিন মধ্যরাতে ======================
+cron.schedule('0 0 * * *', async () => {
+    try {
+        await EmailAccount.updateMany({}, { sentToday: 0 });
+        console.log('✅ sentToday reset for all email accounts');
+    } catch (err) {
+        console.error('❌ sentToday reset failed:', err.message);
+    }
+});
 
 const PORT = process.env.PORT || 8080;
 
