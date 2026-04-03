@@ -193,8 +193,8 @@ router.post('/send', async (req, res) => {
         const sentAt = new Date();
         const followUpDueAt = new Date(sentAt.getTime() + 3 * 24 * 60 * 60 * 1000);
 
-        // Random delay 2–5 minutes then send
-        const delayMs = Math.floor(Math.random() * (5 - 2 + 1) + 2) * 60 * 1000;
+        // Random delay 10–30 seconds then send
+        const delayMs = Math.floor(Math.random() * (30 - 10 + 1) + 10) * 1000;
 
         // Log তৈরি করে সাথে সাথে response দেওয়া
         const log = new EmailLog({
