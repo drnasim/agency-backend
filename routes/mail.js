@@ -14,7 +14,6 @@ const Blacklist = require('../models/Blacklist');
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5173/api/mail/oauth/callback';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 // ====================== EMAIL ACCOUNTS ======================
 
@@ -107,10 +106,10 @@ router.get('/oauth/callback', async (req, res) => {
             });
             await account.save();
         }
-        res.send(`<!DOCTYPE html><html><head><title>Gmail Connected</title></head><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f0fdf4;"><div style="text-align:center"><div style="font-size:48px">✅</div><h2 style="color:#16a34a">Gmail Connected!</h2><p style="color:#6b7280">This window will close automatically...</p></div><script>if(window.opener){window.opener.postMessage('oauth-success','*');setTimeout(()=>window.close(),1500);}else{window.location.href='${FRONTEND_URL}/admin-mail?oauth=success';}<\/script></body></html>`);
+        res.send(`<!DOCTYPE html><html><head><title>Gmail Connected</title></head><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f0fdf4;"><div style="text-align:center"><div style="font-size:48px">✅</div><h2 style="color:#16a34a">Gmail Connected!</h2><p style="color:#6b7280">This window will close automatically...</p></div><script>setTimeout(()=>window.close(),1500);<\/script></body></html>`);
     } catch (err) {
         console.error('OAuth callback error:', err.message);
-        res.send(`<!DOCTYPE html><html><head><title>OAuth Failed</title></head><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#fef2f2;"><div style="text-align:center"><div style="font-size:48px">❌</div><h2 style="color:#dc2626">OAuth Failed</h2><p style="color:#6b7280">This window will close automatically...</p></div><script>if(window.opener){window.opener.postMessage('oauth-error','*');setTimeout(()=>window.close(),2000);}else{window.location.href='${FRONTEND_URL}/admin-mail?oauth=error';}<\/script></body></html>`);
+        res.send(`<!DOCTYPE html><html><head><title>OAuth Failed</title></head><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#fef2f2;"><div style="text-align:center"><div style="font-size:48px">❌</div><h2 style="color:#dc2626">OAuth Failed</h2><p style="color:#6b7280">Check credentials or try again.</p></div><script>setTimeout(()=>window.close(),2500);<\/script></body></html>`);
     }
 });
 
