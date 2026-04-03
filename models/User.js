@@ -8,8 +8,8 @@ const userSchema = new mongoose.Schema({
     // ✅ role এখন array — একজন ইউজার একসাথে Admin ও Editor দুটোই হতে পারবে
     role: { 
         type: [String], 
-        enum: ['Admin', 'Editor'], 
-        default: ['Editor'] 
+        enum: ['Admin', 'Editor', 'Marketer'],
+        default: ['Editor']
     },
     
     phone: { type: String, unique: true, sparse: true },
