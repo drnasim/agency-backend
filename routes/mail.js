@@ -13,7 +13,7 @@ const Blacklist = require('../models/Blacklist');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:8080/api/mail/oauth/callback';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5173/api/mail/oauth/callback';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 // ====================== EMAIL ACCOUNTS ======================
@@ -232,7 +232,7 @@ router.post('/send', async (req, res) => {
         setTimeout(async () => {
             try {
                 const transporter = await getTransporter(account);
-                const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8080';
+                const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5173';
                 const bodyWithPixel = body + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
 
                 const info = await transporter.sendMail({
