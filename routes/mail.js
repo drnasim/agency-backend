@@ -232,7 +232,10 @@ router.post('/send', async (req, res) => {
             try {
                 const transporter = await getTransporter(account);
                 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5173';
-                const bodyWithPixel = body + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
+                const unsubUrl = `${BACKEND_URL}/api/mail/unsubscribe/${encodeURIComponent(toEmail)}`;
+                const bodyWithPixel = body
+                    + `<br><br><hr style="border:none;border-top:1px solid #eee;margin:16px 0"><p style="color:#aaa;font-size:11px;text-align:center;margin:0">Don't want these emails? <a href="${unsubUrl}" style="color:#aaa;text-decoration:underline">Unsubscribe</a></p>`
+                    + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
 
                 const info = await transporter.sendMail({
                     from: `"${account.label}" <${account.email}>`,
@@ -243,8 +246,10 @@ router.post('/send', async (req, res) => {
 
                 await EmailLog.findByIdAndUpdate(log._id, {
                     messageId: info.messageId || '',
-                    threadId: info.threadId || ''
+                    threadId: info.threadId || '',
+                    delivered: true
                 });
+                await EmailAccount.findByIdAndUpdate(account._id, { lastSentAt: new Date() });
             } catch (sendErr) {
                 console.error('Delayed send error:', sendErr.message);
                 // Bounce হলে blacklist করা
@@ -597,6 +602,54 @@ router.delete('/blacklist/:id', async (req, res) => {
     try {
         await Blacklist.findByIdAndDelete(req.params.id);
         res.json({ message: 'Removed from blacklist' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ====================== SENT EMAIL LOGS ======================
+
+router.get('/logs', async (req, res) => {
+    try {
+        const { assignedTo, page = 1, limit = 100 } = req.query;
+        const filter = assignedTo ? { assignedTo } : {};
+        const logs = await EmailLog.find(filter)
+            .sort({ sentAt: -1 })
+            .skip((Number(page) - 1) * Number(limit))
+            .limit(Number(limit));
+        const total = await EmailLog.countDocuments(filter);
+        res.json({ logs, total });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ====================== EMAIL UNSUBSCRIBE ======================
+
+router.get('/unsubscribe/:email', async (req, res) => {
+    try {
+        const email = decodeURIComponent(req.params.email);
+        await Lead.findOneAndUpdate({ email }, { status: 'unsubscribed' });
+        await Blacklist.findOneAndUpdate(
+            { email },
+            { email, domain: email.split('@')[1] || '', reason: 'unsubscribed' },
+            { upsert: true }
+        );
+        res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title></head><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f9fafb"><div style="text-align:center"><div style="font-size:48px">✉️</div><h2 style="color:#374151">You have been unsubscribed</h2><p style="color:#6b7280">You will no longer receive emails from us.</p></div></body></html>`);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ====================== LEAD NOTES & STATUS UPDATE ======================
+
+router.patch('/leads/:id', async (req, res) => {
+    try {
+        const update = {};
+        if (req.body.notes !== undefined) update.notes = req.body.notes;
+        if (req.body.status !== undefined) update.status = req.body.status;
+        const lead = await Lead.findByIdAndUpdate(req.params.id, update, { new: true });
+        res.json(lead);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

@@ -9,7 +9,8 @@ const emailAccountSchema = new mongoose.Schema({
     sentToday: { type: Number, default: 0 },
     warmupEnabled: { type: Boolean, default: false },
     warmupDay: { type: Number, default: 1 },
-    isActive: { type: Boolean, default: true }
+    isActive: { type: Boolean, default: true },
+    lastSentAt: { type: Date }
 }, { timestamps: true });
 
 module.exports = mongoose.model('EmailAccount', emailAccountSchema);

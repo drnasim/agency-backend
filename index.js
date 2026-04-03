@@ -171,7 +171,8 @@ mongoose.connect(MONGO_URI)
 cron.schedule('0 0 * * *', async () => {
     try {
         await EmailAccount.updateMany({}, { sentToday: 0 });
-        console.log('✅ sentToday reset for all email accounts');
+        await EmailAccount.updateMany({ warmupEnabled: true }, { $inc: { warmupDay: 1 } });
+        console.log('✅ sentToday reset + warmupDay incremented for all email accounts');
     } catch (err) {
         console.error('❌ sentToday reset failed:', err.message);
     }
