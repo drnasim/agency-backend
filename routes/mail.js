@@ -115,43 +115,78 @@ router.get('/oauth/callback', async (req, res) => {
 
 // ====================== EMAIL SENDING ======================
 
-const getTransporter = async (account) => {
-    if (account.type === 'gmail') {
-        const oauth2Client = new google.auth.OAuth2(
-            account.credentials.clientId || GOOGLE_CLIENT_ID,
-            account.credentials.clientSecret || GOOGLE_CLIENT_SECRET,
-            GOOGLE_REDIRECT_URI
-        );
-        oauth2Client.setCredentials({
-            refresh_token: account.credentials.refreshToken
-        });
-        const { credentials } = await oauth2Client.refreshAccessToken();
-        return nodemailer.createTransport({
-            host: 'smtp.gmail.com',
-            port: 587,
-            secure: false,
-            requireTLS: true,
-            family: 4,
-            auth: {
-                type: 'OAuth2',
-                user: account.email,
-                clientId: account.credentials.clientId || GOOGLE_CLIENT_ID,
-                clientSecret: account.credentials.clientSecret || GOOGLE_CLIENT_SECRET,
-                refreshToken: account.credentials.refreshToken,
-                accessToken: credentials.access_token
-            }
-        });
-    } else {
-        return nodemailer.createTransport({
-            host: account.credentials.host,
-            port: Number(account.credentials.port) || 587,
-            secure: Number(account.credentials.port) === 465,
-            auth: {
-                user: account.credentials.user,
-                pass: account.credentials.pass
-            }
-        });
-    }
+// RFC 2822 email → base64url (Gmail API format)
+const buildRawEmail = ({ fromName, fromEmail, to, subject, html }) => {
+    const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
+    const htmlB64 = Buffer.from(html, 'utf-8').toString('base64');
+    const textB64 = Buffer.from(html.replace(/<[^>]*>/g, ''), 'utf-8').toString('base64');
+
+    const raw = [
+        `From: "${fromName}" <${fromEmail}>`,
+        `To: ${to}`,
+        `Subject: ${encodedSubject}`,
+        'MIME-Version: 1.0',
+        `Content-Type: multipart/alternative; boundary="${boundary}"`,
+        '',
+        `--${boundary}`,
+        'Content-Type: text/plain; charset=UTF-8',
+        'Content-Transfer-Encoding: base64',
+        '',
+        textB64,
+        '',
+        `--${boundary}`,
+        'Content-Type: text/html; charset=UTF-8',
+        'Content-Transfer-Encoding: base64',
+        '',
+        htmlB64,
+        '',
+        `--${boundary}--`
+    ].join('\r\n');
+
+    return Buffer.from(raw, 'utf-8')
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+};
+
+// Gmail account → Gmail API দিয়ে send (HTTPS 443, SMTP port নয়)
+const sendViaGmailAPI = async (account, { to, subject, html }) => {
+    const oauth2Client = new google.auth.OAuth2(
+        account.credentials.clientId || GOOGLE_CLIENT_ID,
+        account.credentials.clientSecret || GOOGLE_CLIENT_SECRET,
+        GOOGLE_REDIRECT_URI
+    );
+    oauth2Client.setCredentials({ refresh_token: account.credentials.refreshToken });
+    await oauth2Client.refreshAccessToken();
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const raw = buildRawEmail({ fromName: account.label, fromEmail: account.email, to, subject, html });
+
+    const response = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw }
+    });
+
+    return { messageId: response.data.id || '', threadId: response.data.threadId || '' };
+};
+
+// SMTP account → nodemailer (custom SMTP servers এর জন্য)
+const sendViaSmtp = async (account, { to, subject, html }) => {
+    const transporter = nodemailer.createTransport({
+        host: account.credentials.host,
+        port: Number(account.credentials.port) || 587,
+        secure: Number(account.credentials.port) === 465,
+        auth: { user: account.credentials.user, pass: account.credentials.pass }
+    });
+    const info = await transporter.sendMail({
+        from: `"${account.label}" <${account.email}>`,
+        to,
+        subject,
+        html
+    });
+    return { messageId: info.messageId || '', threadId: '' };
 };
 
 router.post('/send', async (req, res) => {
@@ -195,16 +230,10 @@ router.post('/send', async (req, res) => {
             + `<br><br><hr style="border:none;border-top:1px solid #eee;margin:16px 0"><p style="color:#aaa;font-size:11px;text-align:center;margin:0">Don't want these emails? <a href="${unsubUrl}" style="color:#aaa;text-decoration:underline">Unsubscribe</a></p>`
             + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
 
-        // Token refresh করে transporter বানানো
-        const transporter = await getTransporter(account);
-
-        // সরাসরি email পাঠানো (কোনো delay নেই)
-        const info = await transporter.sendMail({
-            from: `"${account.label}" <${account.email}>`,
-            to: toEmail,
-            subject,
-            html: bodyWithPixel
-        });
+        // Gmail API বা SMTP দিয়ে পাঠানো
+        const info = account.type === 'gmail'
+            ? await sendViaGmailAPI(account, { to: toEmail, subject, html: bodyWithPixel })
+            : await sendViaSmtp(account, { to: toEmail, subject, html: bodyWithPixel });
 
         // Log সেভ
         const log = new EmailLog({
