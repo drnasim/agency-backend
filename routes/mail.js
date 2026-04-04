@@ -123,23 +123,18 @@ const getTransporter = async (account) => {
             GOOGLE_REDIRECT_URI
         );
         oauth2Client.setCredentials({
-            access_token: account.credentials.accessToken,
             refresh_token: account.credentials.refreshToken
         });
-        const { token } = await oauth2Client.getAccessToken();
+        const { credentials } = await oauth2Client.refreshAccessToken();
         return nodemailer.createTransport({
-            host: 'smtp.gmail.com',
-            port: 587,
-            secure: false,
-            requireTLS: true,
-            family: 4,
+            service: 'gmail',
             auth: {
                 type: 'OAuth2',
                 user: account.email,
                 clientId: account.credentials.clientId || GOOGLE_CLIENT_ID,
                 clientSecret: account.credentials.clientSecret || GOOGLE_CLIENT_SECRET,
                 refreshToken: account.credentials.refreshToken,
-                accessToken: token
+                accessToken: credentials.access_token
             }
         });
     } else {
@@ -161,16 +156,12 @@ router.post('/send', async (req, res) => {
         return res.status(400).json({ error: 'from, to, subject, body are required.' });
     }
 
+    const toEmail = to.trim().toLowerCase();
+    const toDomain = toEmail.split('@')[1];
+
     try {
         // Blacklist চেক
-        const toEmail = to.trim().toLowerCase();
-        const toDomain = toEmail.split('@')[1];
-        const blocked = await Blacklist.findOne({
-            $or: [
-                { email: toEmail },
-                { domain: toDomain }
-            ]
-        });
+        const blocked = await Blacklist.findOne({ $or: [{ email: toEmail }, { domain: toDomain }] });
         if (blocked) return res.status(400).json({ error: `Recipient is blacklisted (${blocked.reason}).` });
 
         // Account খোঁজা
@@ -190,17 +181,28 @@ router.post('/send', async (req, res) => {
             }
         }
 
-        // Tracking pixel ID
         const trackingPixelId = uuidv4();
-
-        // Follow-up due = sentAt + 3 days
         const sentAt = new Date();
         const followUpDueAt = new Date(sentAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+        const BACKEND_URL = process.env.BACKEND_URL || 'https://agency-backend-production-55bd.up.railway.app';
+        const unsubUrl = `${BACKEND_URL}/api/mail/unsubscribe/${encodeURIComponent(toEmail)}`;
 
-        // Random delay 10–30 seconds then send
-        const delayMs = Math.floor(Math.random() * (30 - 10 + 1) + 10) * 1000;
+        const bodyWithPixel = body
+            + `<br><br><hr style="border:none;border-top:1px solid #eee;margin:16px 0"><p style="color:#aaa;font-size:11px;text-align:center;margin:0">Don't want these emails? <a href="${unsubUrl}" style="color:#aaa;text-decoration:underline">Unsubscribe</a></p>`
+            + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
 
-        // Log তৈরি করে সাথে সাথে response দেওয়া
+        // Token refresh করে transporter বানানো
+        const transporter = await getTransporter(account);
+
+        // সরাসরি email পাঠানো (কোনো delay নেই)
+        const info = await transporter.sendMail({
+            from: `"${account.label}" <${account.email}>`,
+            to: toEmail,
+            subject,
+            html: bodyWithPixel
+        });
+
+        // Log সেভ
         const log = new EmailLog({
             from,
             to: toEmail,
@@ -210,7 +212,10 @@ router.post('/send', async (req, res) => {
             assignedTo: assignedTo || '',
             isFollowUp: !!isFollowUp,
             followUpDueAt,
-            trackingPixelId
+            trackingPixelId,
+            messageId: info.messageId || '',
+            threadId: info.threadId || '',
+            delivered: true
         });
         await log.save();
 
@@ -219,8 +224,8 @@ router.post('/send', async (req, res) => {
             await EmailTemplate.findByIdAndUpdate(templateId, { $inc: { usageCount: 1 } });
         }
 
-        // sentToday++
-        await EmailAccount.findByIdAndUpdate(account._id, { $inc: { sentToday: 1 } });
+        // sentToday++ এবং lastSentAt আপডেট
+        await EmailAccount.findByIdAndUpdate(account._id, { $inc: { sentToday: 1 }, lastSentAt: new Date() });
 
         // Lead status আপডেট
         await Lead.findOneAndUpdate(
@@ -229,46 +234,18 @@ router.post('/send', async (req, res) => {
             { upsert: false }
         );
 
-        res.json({ message: 'Email queued for sending.', delayMinutes: Math.round(delayMs / 60000), logId: log._id });
-
-        // Delayed actual send
-        setTimeout(async () => {
-            try {
-                const transporter = await getTransporter(account);
-                const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5173';
-                const unsubUrl = `${BACKEND_URL}/api/mail/unsubscribe/${encodeURIComponent(toEmail)}`;
-                const bodyWithPixel = body
-                    + `<br><br><hr style="border:none;border-top:1px solid #eee;margin:16px 0"><p style="color:#aaa;font-size:11px;text-align:center;margin:0">Don't want these emails? <a href="${unsubUrl}" style="color:#aaa;text-decoration:underline">Unsubscribe</a></p>`
-                    + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
-
-                const info = await transporter.sendMail({
-                    from: `"${account.label}" <${account.email}>`,
-                    to: toEmail,
-                    subject,
-                    html: bodyWithPixel
-                });
-
-                await EmailLog.findByIdAndUpdate(log._id, {
-                    messageId: info.messageId || '',
-                    threadId: info.threadId || '',
-                    delivered: true
-                });
-                await EmailAccount.findByIdAndUpdate(account._id, { lastSentAt: new Date() });
-            } catch (sendErr) {
-                console.error('Delayed send error:', sendErr.message);
-                // Bounce হলে blacklist করা
-                if (sendErr.responseCode >= 500) {
-                    await Blacklist.findOneAndUpdate(
-                        { email: toEmail },
-                        { email: toEmail, domain: toDomain, reason: 'bounced' },
-                        { upsert: true }
-                    );
-                    await Lead.findOneAndUpdate({ email: toEmail }, { status: 'bounced' });
-                }
-            }
-        }, delayMs);
+        res.json({ message: 'Email sent successfully!', logId: log._id });
 
     } catch (err) {
+        console.error('Send error:', err.message);
+        if (err.responseCode >= 500) {
+            await Blacklist.findOneAndUpdate(
+                { email: toEmail },
+                { email: toEmail, domain: toDomain, reason: 'bounced' },
+                { upsert: true }
+            ).catch(() => {});
+            await Lead.findOneAndUpdate({ email: toEmail }, { status: 'bounced' }).catch(() => {});
+        }
         res.status(500).json({ error: err.message });
     }
 });
