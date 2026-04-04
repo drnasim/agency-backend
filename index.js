@@ -1,4 +1,8 @@
 require('dotenv').config();
+// Force IPv4 DNS resolution — Railway containers fail on IPv6 outbound (ENETUNREACH)
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
