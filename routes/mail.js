@@ -127,7 +127,11 @@ const getTransporter = async (account) => {
         });
         const { credentials } = await oauth2Client.refreshAccessToken();
         return nodemailer.createTransport({
-            service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
+            requireTLS: true,
+            family: 4,
             auth: {
                 type: 'OAuth2',
                 user: account.email,
@@ -256,11 +260,15 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
     try {
         const { salesmanEmail } = req.params;
         const target = await SalesTarget.findOne({ salesmanEmail }).populate('assignedAccounts');
-        if (!target) return res.json([]);
+
+        // SalesTarget না থাকলে (Admin) সব Gmail account দেখানো
+        const accountsToCheck = target
+            ? target.assignedAccounts
+            : await EmailAccount.find({ type: 'gmail', isActive: true });
 
         const allReplies = [];
 
-        for (const account of target.assignedAccounts) {
+        for (const account of accountsToCheck) {
             if (account.type !== 'gmail' || !account.credentials.refreshToken) continue;
             try {
                 const oauth2Client = new google.auth.OAuth2(
@@ -269,9 +277,10 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
                     GOOGLE_REDIRECT_URI
                 );
                 oauth2Client.setCredentials({
-                    access_token: account.credentials.accessToken,
                     refresh_token: account.credentials.refreshToken
                 });
+                // Token সবসময় refresh করা
+                await oauth2Client.refreshAccessToken();
 
                 const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
                 const listRes = await gmail.users.messages.list({
@@ -291,7 +300,6 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
                     const subject = getHeader('Subject');
                     const date = getHeader('Date');
 
-                    // threadId দিয়ে log match করে replied সেট করা
                     const log = await EmailLog.findOneAndUpdate(
                         { threadId, replied: false },
                         { replied: true, repliedAt: new Date() },
@@ -313,9 +321,9 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
             }
         }
 
-        // SMTP accounts — stored logs থেকে replied দেখানো
+        // SMTP replied logs
         const smtpReplies = await EmailLog.find({
-            from: { $in: target.assignedAccounts.map(a => a.email) },
+            from: { $in: accountsToCheck.map(a => a.email) },
             replied: true
         }).sort({ repliedAt: -1 }).limit(50);
 
