@@ -15,10 +15,27 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5173/api/mail/oauth/callback';
 
+// Week-based warm-up daily limit
+// Week 1 (1-7): 10, Week 2 (8-14): 20, Week 3 (15-21): 30, Week 4+ (22+): 50
+const getWarmupLimit = (day) => {
+    if (day <= 7)  return 10;
+    if (day <= 14) return 20;
+    if (day <= 21) return 30;
+    return 50;
+};
+
 // ====================== EMAIL ACCOUNTS ======================
 
 router.get('/accounts', async (req, res) => {
     try {
+        const { salesmanEmail } = req.query;
+        if (salesmanEmail) {
+            // Marketer/Salesman: শুধু assigned accounts দেখাবে
+            const target = await SalesTarget.findOne({ salesmanEmail }).populate('assignedAccounts');
+            if (!target) return res.json([]);
+            return res.json(target.assignedAccounts);
+        }
+        // Admin: সব accounts
         const accounts = await EmailAccount.find().sort({ createdAt: -1 });
         res.json(accounts);
     } catch (err) {
@@ -212,11 +229,11 @@ router.post('/send', async (req, res) => {
             return res.status(429).json({ error: `Daily limit of ${account.dailyLimit} reached for ${from}.` });
         }
 
-        // Warm-up limit চেক
+        // Warm-up limit চেক (week-based schedule)
         if (account.warmupEnabled) {
-            const warmupLimit = Math.min(account.warmupDay * 5, 40);
+            const warmupLimit = getWarmupLimit(account.warmupDay);
             if (account.sentToday >= warmupLimit) {
-                return res.status(429).json({ error: `Warm-up limit of ${warmupLimit} reached today (Day ${account.warmupDay}).` });
+                return res.status(429).json({ error: `Warm-up limit of ${warmupLimit} reached today (Day ${account.warmupDay}, Week ${Math.ceil(account.warmupDay / 7)}).` });
             }
         }
 

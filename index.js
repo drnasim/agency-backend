@@ -172,13 +172,30 @@ mongoose.connect(MONGO_URI)
     });
 
 // ====================== CRON: sentToday রিসেট প্রতিদিন মধ্যরাতে ======================
+const getWarmupLimit = (day) => {
+    if (day <= 7)  return 10;
+    if (day <= 14) return 20;
+    if (day <= 21) return 30;
+    return 50;
+};
+
 cron.schedule('0 0 * * *', async () => {
     try {
         await EmailAccount.updateMany({}, { sentToday: 0 });
-        await EmailAccount.updateMany({ warmupEnabled: true }, { $inc: { warmupDay: 1 } });
-        console.log('✅ sentToday reset + warmupDay incremented for all email accounts');
+
+        // warmupEnabled accounts: warmupDay++ এবং dailyLimit auto-update
+        const warmupAccounts = await EmailAccount.find({ warmupEnabled: true });
+        for (const acc of warmupAccounts) {
+            const newDay = acc.warmupDay + 1;
+            const newLimit = getWarmupLimit(newDay);
+            await EmailAccount.findByIdAndUpdate(acc._id, {
+                warmupDay: newDay,
+                dailyLimit: newLimit
+            });
+        }
+        console.log(`✅ sentToday reset + warmupDay incremented for ${warmupAccounts.length} accounts`);
     } catch (err) {
-        console.error('❌ sentToday reset failed:', err.message);
+        console.error('❌ Cron job failed:', err.message);
     }
 });
 
