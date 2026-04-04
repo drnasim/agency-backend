@@ -128,7 +128,10 @@ const getTransporter = async (account) => {
         });
         const { token } = await oauth2Client.getAccessToken();
         return nodemailer.createTransport({
-            service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 465,
+            secure: true,
+            family: 4,
             auth: {
                 type: 'OAuth2',
                 user: account.email,
@@ -619,6 +622,18 @@ router.get('/logs', async (req, res) => {
             .limit(Number(limit));
         const total = await EmailLog.countDocuments(filter);
         res.json({ logs, total });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ====================== SINGLE LOG STATUS ======================
+
+router.get('/logs/:id', async (req, res) => {
+    try {
+        const log = await EmailLog.findById(req.params.id).select('messageId delivered opened openedAt sentAt');
+        if (!log) return res.status(404).json({ error: 'Log not found' });
+        res.json(log);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
