@@ -165,4 +165,20 @@ router.put('/update', async (req, res) => {
     }
 });
 
+// সব ইউজার বা নির্দিষ্ট রোলের ইউজার লিস্ট পাওয়ার API
+router.get('/users', async (req, res) => {
+    try {
+        const { role } = req.query;
+        let users;
+        if (role) {
+            users = await User.find({ role: role }).select('name email role');
+        } else {
+            users = await User.find({}).select('name email role');
+        }
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;
