@@ -99,11 +99,15 @@ router.delete('/:id', async (req, res) => {
         // ১. Employee কালেকশন থেকে ডিলিট
         await Employee.findByIdAndDelete(req.params.id);
 
-        // ২. User/Auth কালেকশন থেকে সম্পূর্ণ ডিলিট (সরাসরি imported User ব্যবহার)
-        await User.findOneAndDelete({ email: employeeEmail });
+        // ২. User/Auth কালেকশন থেকে সম্পূর্ণ ডিলিট (belt-and-suspenders)
+        if (employeeEmail) {
+            // isActive false করা হচ্ছে যাতে race condition-এ লগইন ব্লক হয়
+            await User.updateOne({ email: employeeEmail }, { $set: { isActive: false } });
+            await User.deleteOne({ email: employeeEmail });
+        }
 
         // ৩. Socket.io দিয়ে real-time force logout পাঠানো (active session কিল করতে)
-        if (global.io) {
+        if (global.io && employeeEmail) {
             global.io.emit('force_logout', { email: employeeEmail });
         }
 

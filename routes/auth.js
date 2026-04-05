@@ -86,8 +86,8 @@ router.post('/login', async (req, res) => {
         // ✅ role array নিশ্চিত করা (পুরনো স্ট্রিং ডেটার জন্য backward compatibility)
         const roleArray = Array.isArray(user.role) ? user.role : [user.role];
 
-        // ✅ primaryRole: Admin থাকলে Admin, না হলে Editor
-        const primaryRole = roleArray.includes('Admin') ? 'Admin' : 'Editor';
+        // ✅ primaryRole: Admin > Marketer > Editor priority
+        const primaryRole = roleArray.includes('Admin') ? 'Admin' : roleArray.includes('Marketer') ? 'Marketer' : 'Editor';
 
         res.status(200).json({ 
             name: user.name, 
