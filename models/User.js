@@ -15,7 +15,9 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, unique: true, sparse: true },
     dob: { type: String, default: '' },
     gender: { type: String, enum: ['Male', 'Female'], default: 'Male' },
-    profilePic: { type: String, default: '' }
+    profilePic: { type: String, default: '' },
+    // অ্যাকাউন্ট ডিলিট/ডিজেবল হলে false হবে — লগিন ব্লক হবে
+    isActive: { type: Boolean, default: true }
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

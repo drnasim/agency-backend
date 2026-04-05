@@ -76,6 +76,8 @@ router.post('/login', async (req, res) => {
         }
 
         if (!user) return res.status(404).json({ error: "User not found in database!" });
+        // ডিলিট/ডিজেবল করা অ্যাকাউন্ট ব্লক করা হচ্ছে
+        if (user.isActive === false) return res.status(403).json({ error: "This account has been deactivated. Please contact admin." });
         if (!user.password) return res.status(400).json({ error: "Password is not set for this account." });
 
         const validPass = await bcrypt.compare(req.body.password, user.password);

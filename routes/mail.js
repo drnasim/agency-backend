@@ -10,6 +10,7 @@ const EmailLog = require('../models/EmailLog');
 const EmailTemplate = require('../models/EmailTemplate');
 const SalesTarget = require('../models/SalesTarget');
 const Blacklist = require('../models/Blacklist');
+const User = require('../models/User');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -338,10 +339,17 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
         const { salesmanEmail } = req.params;
         const target = await SalesTarget.findOne({ salesmanEmail }).populate('assignedAccounts');
 
-        // SalesTarget না থাকলে (Admin) সব Gmail account দেখানো
-        const accountsToCheck = target
-            ? target.assignedAccounts
-            : await EmailAccount.find({ type: 'gmail', isActive: true });
+        // SalesTarget না থাকলে, User এর role চেক করো
+        // Admin হলে সব accounts, অন্যথা খালি (strict isolation)
+        let accountsToCheck;
+        if (target) {
+            accountsToCheck = target.assignedAccounts;
+        } else {
+            const callerUser = await User.findOne({ email: salesmanEmail });
+            const callerRoles = callerUser ? (Array.isArray(callerUser.role) ? callerUser.role : [callerUser.role]) : [];
+            const isAdmin = callerRoles.includes('Admin');
+            accountsToCheck = isAdmin ? await EmailAccount.find({ type: 'gmail', isActive: true }) : [];
+        }
 
         const allReplies = [];
 

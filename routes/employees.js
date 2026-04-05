@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Employee = require('../models/Employee');
+const User = require('../models/User');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -98,14 +99,12 @@ router.delete('/:id', async (req, res) => {
         // ১. Employee কালেকশন থেকে ডিলিট
         await Employee.findByIdAndDelete(req.params.id);
 
-        // ২. User/Auth কালেকশন থেকেও ডিলিট (লগিন বন্ধ করতে)
-        try {
-            const User = mongoose.models.User || mongoose.model('User');
-            if (User && employeeEmail) {
-                await User.findOneAndDelete({ email: employeeEmail });
-            }
-        } catch (authErr) {
-            console.log("Auth User deletion skipped:", authErr.message);
+        // ২. User/Auth কালেকশন থেকে সম্পূর্ণ ডিলিট (সরাসরি imported User ব্যবহার)
+        await User.findOneAndDelete({ email: employeeEmail });
+
+        // ৩. Socket.io দিয়ে real-time force logout পাঠানো (active session কিল করতে)
+        if (global.io) {
+            global.io.emit('force_logout', { email: employeeEmail });
         }
 
         res.status(200).json({ message: 'Employee and user account deleted successfully' });
