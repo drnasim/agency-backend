@@ -86,13 +86,31 @@ router.put('/:id', async (req, res) => {
     }
 });
 
-// এডিটর ডিলিট করার API
+// এডিটর ডিলিট করার API (Employee + User/Auth উভয় থেকে)
 router.delete('/:id', async (req, res) => {
     try {
+        // আগে Employee খুঁজে email বের করতে হবে
+        const employee = await Employee.findById(req.params.id);
+        if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+        const employeeEmail = employee.email;
+
+        // ১. Employee কালেকশন থেকে ডিলিট
         await Employee.findByIdAndDelete(req.params.id);
-        res.status(200).json({ message: 'Employee deleted successfully' });
-    } catch (err) { 
-        res.status(500).json({ error: err.message }); 
+
+        // ২. User/Auth কালেকশন থেকেও ডিলিট (লগিন বন্ধ করতে)
+        try {
+            const User = mongoose.models.User || mongoose.model('User');
+            if (User && employeeEmail) {
+                await User.findOneAndDelete({ email: employeeEmail });
+            }
+        } catch (authErr) {
+            console.log("Auth User deletion skipped:", authErr.message);
+        }
+
+        res.status(200).json({ message: 'Employee and user account deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 

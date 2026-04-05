@@ -300,6 +300,37 @@ router.post('/send', async (req, res) => {
     }
 });
 
+// ====================== EMAIL BODY EXTRACTOR ======================
+
+function extractEmailBody(payload) {
+    if (!payload) return '';
+    // Direct body (non-multipart)
+    if (payload.body && payload.body.size > 0 && payload.body.data) {
+        const decoded = Buffer.from(payload.body.data, 'base64').toString('utf-8');
+        return decoded;
+    }
+    if (payload.parts && payload.parts.length > 0) {
+        // Prefer HTML part
+        const htmlPart = payload.parts.find(p => p.mimeType === 'text/html');
+        if (htmlPart && htmlPart.body && htmlPart.body.data) {
+            return Buffer.from(htmlPart.body.data, 'base64').toString('utf-8');
+        }
+        // Fall back to plain text part
+        const textPart = payload.parts.find(p => p.mimeType === 'text/plain');
+        if (textPart && textPart.body && textPart.body.data) {
+            return Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+        }
+        // Recursively check nested multipart parts
+        for (const part of payload.parts) {
+            if (part.parts) {
+                const nested = extractEmailBody(part);
+                if (nested) return nested;
+            }
+        }
+    }
+    return '';
+}
+
 // ====================== INBOX (REPLIES) ======================
 
 router.get('/inbox/:salesmanEmail', async (req, res) => {
@@ -337,14 +368,15 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
 
                 const messages = listRes.data.messages || [];
                 for (const msg of messages) {
-                    const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] });
-                    const headers = detail.data.payload.headers;
+                    const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
+                    const headers = detail.data.payload.headers || [];
                     const getHeader = (name) => (headers.find(h => h.name.toLowerCase() === name.toLowerCase()) || {}).value || '';
 
                     const threadId = detail.data.threadId;
                     const fromHeader = getHeader('From');
                     const subject = getHeader('Subject');
                     const date = getHeader('Date');
+                    const body = extractEmailBody(detail.data.payload);
 
                     const log = await EmailLog.findOneAndUpdate(
                         { threadId, replied: false },
@@ -358,6 +390,7 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
                         from: fromHeader,
                         subject,
                         date,
+                        body,
                         account: account.email,
                         logUpdated: !!log
                     });
