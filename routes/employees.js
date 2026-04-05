@@ -117,4 +117,47 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
+// ঐতিহাসিক Ghost Account ক্লিনআপ API
+// Employee list-এ নেই কিন্তু User collection-এ আছে — এমন সব Users মুছে দেবে
+// Admin account সবসময় preserved থাকবে
+router.post('/cleanup-ghosts', async (req, res) => {
+    try {
+        // সব active employee emails সংগ্রহ করা
+        const employees = await Employee.find({}, 'email');
+        const employeeEmails = employees.map(e => e.email.toLowerCase().trim());
+
+        // Admin account সবসময় রাখতে হবে
+        const PROTECTED_EMAILS = ['admin@agency.com'];
+
+        // Ghost users: User collection-এ আছে কিন্তু Employee-তে নেই এবং protected নয়
+        const ghostUsers = await User.find({
+            email: { $nin: [...employeeEmails, ...PROTECTED_EMAILS] }
+        });
+
+        if (ghostUsers.length === 0) {
+            return res.status(200).json({ message: 'No ghost accounts found. Database is clean!', deleted: 0 });
+        }
+
+        const ghostEmails = ghostUsers.map(u => u.email);
+
+        // সবাইকে একসাথে ডিলিট করা
+        const result = await User.deleteMany({ email: { $in: ghostEmails } });
+
+        // Socket দিয়ে সবাইকে force logout করা
+        if (global.io) {
+            ghostEmails.forEach(email => {
+                global.io.emit('force_logout', { email });
+            });
+        }
+
+        res.status(200).json({
+            message: `Cleanup complete! ${result.deletedCount} ghost account(s) removed.`,
+            deleted: result.deletedCount,
+            removedEmails: ghostEmails
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

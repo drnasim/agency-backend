@@ -149,7 +149,7 @@ router.put('/update', async (req, res) => {
 
         // ✅ role array নিশ্চিত করা
         const roleArray = Array.isArray(updatedUser.role) ? updatedUser.role : [updatedUser.role];
-        const primaryRole = roleArray.includes('Admin') ? 'Admin' : 'Editor';
+        const primaryRole = roleArray.includes('Admin') ? 'Admin' : roleArray.includes('Marketer') ? 'Marketer' : 'Editor';
 
         res.status(200).json({ 
             message: "Profile updated successfully!", 
