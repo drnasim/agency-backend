@@ -107,6 +107,7 @@ router.get('/me', async (req, res) => {
         const email = req.query.email;
         const user = await User.findOne({ email });
         if (!user) return res.status(404).json({ error: "User not found" });
+        if (user.isActive === false) return res.status(403).json({ error: "Account deactivated" });
 
         // ✅ role array নিশ্চিত করা
         const roleArray = Array.isArray(user.role) ? user.role : [user.role];
