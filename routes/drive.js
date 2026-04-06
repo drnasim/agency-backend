@@ -2,11 +2,20 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { google } = require('googleapis');
-const stream = require('stream');
-const cron = require('node-cron'); // অটো ডিলিটের জন্য
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const cron = require('node-cron');
 
-// মেমোরিতে ফাইল রাখার জন্য multer সেটআপ
-const upload = multer({ storage: multer.memoryStorage() });
+// ✅ OOM Fix: memoryStorage → diskStorage (ফাইল RAM এ না রেখে ডিস্কে টেম্প ফাইল হিসেবে রাখবে)
+const tmpDir = path.join(os.tmpdir(), 'fortivus-uploads');
+if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+const diskStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, tmpDir),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+});
+const upload = multer({ storage: diskStorage, limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB
 
 // ==============================================================
 // হেল্পার ফাংশন: ড্রাইভে ফোল্ডার খোঁজা বা নতুন করে তৈরি করা
@@ -62,10 +71,21 @@ const getAuth = () => {
     return { drive, mainFolderId };
 };
 
+// ✅ টেম্প ফাইল সেইফলি ডিলিট করার হেল্পার
+const cleanupTempFile = (filePath) => {
+    if (filePath) {
+        fs.unlink(filePath, (err) => {
+            if (err && err.code !== 'ENOENT') console.error('Temp file cleanup error:', err.message);
+        });
+    }
+};
+
 // ==============================================================
-// ফাইল আপলোড API
+// ফাইল আপলোড API — ✅ Stream ব্যবহার করে (RAM ফুল হবে না)
 // ==============================================================
 router.post('/upload', upload.single('file'), async (req, res) => {
+    const tempFilePath = req.file?.path;
+
     try {
         const file = req.file;
         const clientName = req.body.clientName || 'General_Clients';
@@ -82,8 +102,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         const clientFolderId = await getOrCreateFolder(drive, clientName, mainFolderId);
         const projectFolderId = await getOrCreateFolder(drive, projectName, clientFolderId);
 
-        const bufferStream = new stream.PassThrough();
-        bufferStream.end(file.buffer);
+        // ✅ OOM Fix: Buffer/PassThrough এর বদলে সরাসরি fs.createReadStream ব্যবহার
+        // ফাইল ডিস্ক থেকে ছোট ছোট chunk এ পড়ে সরাসরি Google Drive এ পাঠাচ্ছে
+        const fileStream = fs.createReadStream(tempFilePath);
         
         const response = await drive.files.create({
             requestBody: {
@@ -93,11 +114,14 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             },
             media: {
                 mimeType: file.mimetype,
-                body: bufferStream
+                body: fileStream  // ✅ আগে bufferStream ছিল — এখন fileStream
             }
         });
         
         const fileUrl = `https://drive.google.com/file/d/${response.data.id}/view`;
+
+        // ✅ আপলোড শেষে টেম্প ফাইল ডিলিট
+        cleanupTempFile(tempFilePath);
         
         return res.status(200).json({
             message: "File uploaded successfully to Google Drive!",
@@ -106,6 +130,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
     } catch (err) {
         console.error("Upload Error:", err);
+        // এরর হলেও টেম্প ফাইল ক্লিনআপ
+        cleanupTempFile(tempFilePath);
         res.status(500).json({ error: err.message });
     }
 });
