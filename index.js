@@ -134,17 +134,18 @@ io.on('connection', (socket) => {
         if (data && data.room) {
             socket.to(data.room).emit('receive_message', data);
         }
-        
+
         try {
-            const ChatRoom = mongoose.model('ChatRoom'); 
-            const room = await ChatRoom.findById(data.room);
+            // ✅ ফিক্সড: ChatRoom → Room (আগের ChatRoom model ভুল ছিল)
+            const Room = require('./models/Room');
+            const room = await Room.findById(data.room);
             if (room) {
                 const receivers = room.members.filter(m => m !== data.sender);
                 receivers.forEach(receiverName => {
                     const payload = {
                         title: `New Message from ${data.sender}`,
                         body: data.text || "Sent an attachment 📎",
-                        url: "/dashboard" 
+                        url: "/dashboard"
                     };
                     global.sendPushNotification(receiverName, payload);
                 });
@@ -152,6 +153,35 @@ io.on('connection', (socket) => {
         } catch (error) {
             console.log("Push notification send error:", error.message);
         }
+    });
+
+    // ✅ মেসেজ ডেলিভার হওয়ার ইভেন্ট — ইউজার কানেক্ট হলে তার রুমের মেসেজ delivered মার্ক হবে
+    socket.on('mark_delivered', async ({ room, username }) => {
+        try {
+            const Message = require('./models/Message');
+            await Message.updateMany(
+                { room, sender: { $ne: username }, deliveredTo: { $nin: [username] } },
+                { $addToSet: { deliveredTo: username }, $set: { deliveredAt: new Date() } }
+            );
+            // status 'sent' → 'delivered' আপডেট
+            await Message.updateMany(
+                { room, sender: { $ne: username }, status: 'sent' },
+                { $set: { status: 'delivered' } }
+            );
+            socket.to(room).emit('messages_delivered', { room, deliveredTo: username, deliveredAt: new Date().toISOString() });
+        } catch (e) { /* silent */ }
+    });
+
+    // ✅ মেসেজ read হওয়ার ইভেন্ট — ইউজার চ্যাট ওপেন করলে read মার্ক হবে
+    socket.on('mark_read', async ({ room, username }) => {
+        try {
+            const Message = require('./models/Message');
+            await Message.updateMany(
+                { room, sender: { $ne: username }, readBy: { $nin: [username] } },
+                { $addToSet: { readBy: username }, $set: { status: 'read', readAt: new Date() } }
+            );
+            socket.to(room).emit('messages_read', { room, readBy: username, readAt: new Date().toISOString() });
+        } catch (e) { /* silent */ }
     });
 
     socket.on('disconnect', () => {
