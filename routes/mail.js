@@ -303,7 +303,6 @@ router.post('/send', async (req, res) => {
 
 // ====================== EMAIL BODY EXTRACTOR ======================
 // ✅ উন্নত ভার্সন — সব ধরনের nested multipart email structure হ্যান্ডেল করতে পারবে
-// যেমন: multipart/mixed → multipart/alternative → text/html
 
 function extractEmailBody(payload) {
     if (!payload) return '';
@@ -315,21 +314,17 @@ function extractEmailBody(payload) {
 
     if (!payload.parts || payload.parts.length === 0) return '';
 
-    // ✅ সব parts থেকে recursively সব text/html এবং text/plain খুঁজে বের করা
     let htmlBody = '';
     let textBody = '';
 
     const searchParts = (parts) => {
         for (const part of parts) {
-            // HTML part পেলে সেভ করা
             if (part.mimeType === 'text/html' && part.body && part.body.data) {
                 htmlBody = Buffer.from(part.body.data, 'base64').toString('utf-8');
             }
-            // Plain text part পেলে সেভ করা (fallback হিসেবে)
             if (part.mimeType === 'text/plain' && part.body && part.body.data && !textBody) {
                 textBody = Buffer.from(part.body.data, 'base64').toString('utf-8');
             }
-            // Nested parts থাকলে ভিতরে ঢুকে খোঁজা (recursive)
             if (part.parts && part.parts.length > 0) {
                 searchParts(part.parts);
             }
@@ -337,12 +332,12 @@ function extractEmailBody(payload) {
     };
 
     searchParts(payload.parts);
-
-    // HTML আগে priority, না পেলে plain text
     return htmlBody || textBody || '';
 }
 
 // ====================== INBOX (REPLIES) ======================
+// ✅ OOM Fix: আগে 50টা email এর full body একসাথে RAM এ লোড হতো — এখন শুধু headers নেওয়া হচ্ছে
+// Body আলাদাভাবে lazy-load হবে যখন ইউজার ক্লিক করবে
 
 router.get('/inbox/:salesmanEmail', async (req, res) => {
     try {
@@ -381,38 +376,46 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
                 const listRes = await gmail.users.messages.list({
                     userId: 'me',
                     labelIds: ['INBOX'],
-                    maxResults: 50
+                    maxResults: 15  // ✅ OOM Fix: 50 → 15 (RAM কম খাবে, rate limit ও কমবে)
                 });
 
                 const messages = listRes.data.messages || [];
+
+                // ✅ OOM Fix: format 'full' → 'metadata' (শুধু headers, body নয়)
+                // Body পরে lazy-load হবে /message-body/ endpoint দিয়ে
                 for (const msg of messages) {
-                    const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
-                    const headers = detail.data.payload.headers || [];
+                    const detail = await gmail.users.messages.get({
+                        userId: 'me',
+                        id: msg.id,
+                        format: 'metadata',
+                        metadataHeaders: ['From', 'Subject', 'Date']
+                    });
+                    const headers = detail.data.payload?.headers || [];
                     const getHeader = (name) => (headers.find(h => h.name.toLowerCase() === name.toLowerCase()) || {}).value || '';
 
                     const threadId = detail.data.threadId;
-                    const fromHeader = getHeader('From');
-                    const subject = getHeader('Subject');
-                    const date = getHeader('Date');
-                    const body = extractEmailBody(detail.data.payload);
-
-                    const log = await EmailLog.findOneAndUpdate(
-                        { threadId, replied: false },
-                        { replied: true, repliedAt: new Date() },
-                        { new: true }
-                    );
 
                     allReplies.push({
                         messageId: msg.id,
                         threadId,
-                        from: fromHeader,
-                        subject,
-                        date,
-                        body,
+                        from: getHeader('From'),
+                        subject: getHeader('Subject'),
+                        date: getHeader('Date'),
+                        body: '',  // ✅ body খালি — ক্লিক করলে lazy-load হবে
                         account: account.email,
-                        logUpdated: !!log
+                        logUpdated: false
                     });
                 }
+
+                // ✅ OOM Fix: EmailLog bulk update (আগে 1 by 1 ছিল)
+                const threadIds = allReplies.filter(r => r.account === account.email).map(r => r.threadId).filter(Boolean);
+                if (threadIds.length > 0) {
+                    await EmailLog.updateMany(
+                        { threadId: { $in: threadIds }, replied: false },
+                        { replied: true, repliedAt: new Date() }
+                    );
+                }
+
             } catch (gmailErr) {
                 console.error(`Gmail poll error for ${account.email}:`, gmailErr.message);
             }
@@ -422,10 +425,38 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
         const smtpReplies = await EmailLog.find({
             from: { $in: accountsToCheck.map(a => a.email) },
             replied: true
-        }).sort({ repliedAt: -1 }).limit(50);
+        }).sort({ repliedAt: -1 }).limit(15);
 
         res.json({ gmailReplies: allReplies, smtpReplies });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ✅ নতুন API: email body lazy-load — ক্লিক করলে শুধু সেই একটা email এর body আনবে
+router.get('/message-body/:accountEmail/:messageId', async (req, res) => {
+    try {
+        const { accountEmail, messageId } = req.params;
+        const account = await EmailAccount.findOne({ email: accountEmail, isActive: true });
+        if (!account || account.type !== 'gmail') {
+            return res.status(404).json({ error: 'Account not found' });
+        }
+
+        const oauth2Client = new google.auth.OAuth2(
+            account.credentials.clientId || GOOGLE_CLIENT_ID,
+            account.credentials.clientSecret || GOOGLE_CLIENT_SECRET,
+            GOOGLE_REDIRECT_URI
+        );
+        oauth2Client.setCredentials({ refresh_token: account.credentials.refreshToken });
+        await oauth2Client.refreshAccessToken();
+
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+        const detail = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+        const body = extractEmailBody(detail.data.payload);
+
+        res.json({ body });
+    } catch (err) {
+        console.error('Message body fetch error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
