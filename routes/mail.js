@@ -342,6 +342,23 @@ function extractEmailBody(payload) {
 router.get('/inbox/:salesmanEmail', async (req, res) => {
     try {
         const { salesmanEmail } = req.params;
+
+        // ✅ Role-Based Access Check — Sidebar এর মতো একই রুল backend এও enforce করা
+        // Blocked: Editor only, Editor + Admin (Marketer ছাড়া)
+        // Allowed: Marketer, Admin only (Editor ছাড়া), Admin + Editor + Marketer
+        const callerUser = await User.findOne({ email: salesmanEmail });
+        if (callerUser) {
+            const callerRoles = Array.isArray(callerUser.role) ? callerUser.role : [callerUser.role];
+            const hasMarketer = callerRoles.includes('Marketer');
+            const hasEditor = callerRoles.includes('Editor');
+            const hasAdmin = callerRoles.includes('Admin');
+
+            // Editor+Admin কিন্তু Marketer নেই → Gmail poll করবে না, সরাসরি খালি রিটার্ন
+            if (hasEditor && !hasMarketer) {
+                return res.json({ gmailReplies: [], smtpReplies: [] });
+            }
+        }
+
         const target = await SalesTarget.findOne({ salesmanEmail }).populate('assignedAccounts');
 
         // SalesTarget না থাকলে, User এর role চেক করো
@@ -350,7 +367,6 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
         if (target) {
             accountsToCheck = target.assignedAccounts;
         } else {
-            const callerUser = await User.findOne({ email: salesmanEmail });
             const callerRoles = callerUser ? (Array.isArray(callerUser.role) ? callerUser.role : [callerUser.role]) : [];
             const isAdmin = callerRoles.includes('Admin');
             accountsToCheck = isAdmin ? await EmailAccount.find({ type: 'gmail', isActive: true }) : [];

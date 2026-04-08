@@ -184,4 +184,27 @@ router.get('/users', async (req, res) => {
     }
 });
 
+// ✅ মোবাইল অ্যাপ থেকে Expo Push Token সেভ করার API
+// অ্যাপে লগিন করার পর এই endpoint এ token পাঠানো হবে
+router.post('/push-token', async (req, res) => {
+    try {
+        const { email, expoPushToken } = req.body;
+        if (!email || !expoPushToken) {
+            return res.status(400).json({ error: 'email and expoPushToken are required' });
+        }
+
+        const user = await User.findOneAndUpdate(
+            { email },
+            { expoPushToken },
+            { new: true }
+        );
+
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        res.status(200).json({ message: 'Push token saved successfully', name: user.name });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

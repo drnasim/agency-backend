@@ -17,7 +17,10 @@ const userSchema = new mongoose.Schema({
     gender: { type: String, enum: ['Male', 'Female'], default: 'Male' },
     profilePic: { type: String, default: '' },
     // অ্যাকাউন্ট ডিলিট/ডিজেবল হলে false হবে — লগিন ব্লক হবে
-    isActive: { type: Boolean, default: true }
+    isActive: { type: Boolean, default: true },
+
+    // ✅ মোবাইল অ্যাপের Expo Push Token — Android নোটিফিকেশনের জন্য
+    expoPushToken: { type: String, default: '' }
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

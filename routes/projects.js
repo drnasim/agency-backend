@@ -1,6 +1,31 @@
 const express = require('express');
 const router = express.Router();
 const Project = require('../models/Project');
+const User = require('../models/User');
+
+// ✅ Expo Push Notification পাঠানোর হেল্পার ফাংশন
+// Expo Push API ব্যবহার করে — কোনো API key লাগে না, শুধু ইউজারের push token দরকার
+const sendExpoPush = async (expoPushToken, title, body, data = {}) => {
+    if (!expoPushToken || !expoPushToken.startsWith('ExponentPushToken')) return;
+
+    try {
+        await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                to: expoPushToken,
+                title,
+                body,
+                sound: 'default',
+                priority: 'high',
+                channelId: 'project-alerts',  // ✅ Android notification channel — রিংটোন বাজবে
+                data
+            })
+        });
+    } catch (err) {
+        console.error('Expo push error:', err.message);
+    }
+};
 
 // সব প্রজেক্ট দেখার API
 router.get('/', async (req, res) => {
@@ -22,19 +47,53 @@ router.get('/:id', async (req, res) => {
     }
 });
 
-// নতুন প্রজেক্ট অ্যাড করার API
+// নতুন প্রজেক্ট অ্যাড করার API — ✅ Expo Push + Self-assignment check
 router.post('/', async (req, res) => {
     try {
         const newProject = new Project(req.body);
         const savedProject = await newProject.save();
 
+        const assignedTo = savedProject.assignedTo || savedProject.assignedEditor;
+        const createdBy = req.body.createdBy || '';
+
         // ================= Push Notification =================
-        // প্রজেক্ট যাকে অ্যাসাইন করা হয়েছে (Editor), শুধু তাকেই নোটিফিকেশন পাঠানো হবে
-        if (savedProject.assignedTo && global.sendPushNotification) {
-            global.sendPushNotification(savedProject.assignedTo, {
-                title: 'New Project Assigned! 🚀',
-                body: `You have been assigned to: ${savedProject.projectName || 'a new project'}`
-            });
+        if (assignedTo) {
+
+            // ✅ Self-Assignment Check: নিজে নিজেকে অ্যাসাইন করলে নোটিফিকেশন যাবে না
+            if (createdBy && assignedTo === createdBy) {
+                console.log(`Self-assignment detected (${createdBy}) — skipping notification`);
+            } else {
+                const notifTitle = 'New Project Assigned! 🚀';
+                const notifBody = `You have been assigned to: ${savedProject.title || savedProject.projectName || 'a new project'}`;
+
+                // ✅ ১. Web Push (Browser) — আগের সিস্টেম, এখনো কাজ করবে
+                if (global.sendPushNotification) {
+                    global.sendPushNotification(assignedTo, {
+                        title: notifTitle,
+                        body: notifBody
+                    });
+                }
+
+                // ✅ ২. Mobile Push (Expo/Android) — নতুন সিস্টেম
+                // Editor এর email দিয়ে তার Expo push token খুঁজে নোটিফিকেশন পাঠানো
+                try {
+                    // assignedTo নাম বা ইমেইল হতে পারে — দুইটাই চেক
+                    const editor = await User.findOne({
+                        $or: [{ name: assignedTo }, { email: assignedTo }],
+                        expoPushToken: { $ne: '' }
+                    });
+
+                    if (editor && editor.expoPushToken) {
+                        await sendExpoPush(editor.expoPushToken, notifTitle, notifBody, {
+                            projectId: savedProject._id.toString(),
+                            type: 'new_project'
+                        });
+                        console.log(`📱 Mobile push sent to ${editor.name}`);
+                    }
+                } catch (pushErr) {
+                    console.log('Mobile push lookup error:', pushErr.message);
+                }
+            }
         }
 
         res.status(201).json(savedProject);
@@ -43,10 +102,9 @@ router.post('/', async (req, res) => {
     }
 });
 
-// প্রজেক্ট আপডেট বা সাবমিট করার API (PATCH)
+// প্রজেক্ট আপডেট বা সাবমিট করার API (PATCH) — ✅ Expo Push যোগ
 router.patch('/:id', async (req, res) => {
     try {
-        // আপডেট করার আগে পুরনো ডাটা তুলে নিচ্ছি, যাতে কী পরিবর্তন হলো সেটা বুঝতে পারি
         const oldProject = await Project.findById(req.params.id);
         
         const updatedProject = await Project.findByIdAndUpdate(
@@ -64,33 +122,75 @@ router.patch('/:id', async (req, res) => {
             
             // ১. এডিটর যদি কাজ জমা দেয় (Status changed to Submitted)
             if (req.body.status && req.body.status === 'Submitted' && oldProject.status !== 'Submitted') {
-                // অ্যাডমিনকে (যিনি প্রজেক্ট তৈরি করেছেন) নোটিফিকেশন পাঠাবো
                 if (updatedProject.createdBy) {
-                    global.sendPushNotification(updatedProject.createdBy, {
-                        title: 'Project Submitted! ✅',
-                        body: `${updatedProject.assignedTo || 'Editor'} has submitted the project: ${updatedProject.projectName || ''}`
-                    });
+                    const notifTitle = 'Project Submitted! ✅';
+                    const notifBody = `${updatedProject.assignedTo || updatedProject.assignedEditor || 'Editor'} has submitted: ${updatedProject.title || updatedProject.projectName || ''}`;
+
+                    global.sendPushNotification(updatedProject.createdBy, { title: notifTitle, body: notifBody });
+
+                    // ✅ Mobile push to admin/creator
+                    try {
+                        const creator = await User.findOne({
+                            $or: [{ name: updatedProject.createdBy }, { email: updatedProject.createdBy }],
+                            expoPushToken: { $ne: '' }
+                        });
+                        if (creator?.expoPushToken) {
+                            await sendExpoPush(creator.expoPushToken, notifTitle, notifBody, {
+                                projectId: updatedProject._id.toString(),
+                                type: 'project_submitted'
+                            });
+                        }
+                    } catch (e) { /* silent */ }
                 }
             } 
             
-            // ২. অ্যাডমিন যদি কারেকশন বা রিভিশন দেয় (Status changed to Revision)
+            // ২. অ্যাডমিন যদি কারেকশন বা রিভিশন দেয়
             else if (req.body.status && req.body.status === 'Revision' && oldProject.status !== 'Revision') {
-                // শুধু নির্দিষ্ট এডিটরকে জানাবো
-                if (updatedProject.assignedTo) {
-                    global.sendPushNotification(updatedProject.assignedTo, {
-                        title: 'Revision Needed! ⚠️',
-                        body: `Admin requested a revision for your project: ${updatedProject.projectName || ''}`
-                    });
+                const assignedTo = updatedProject.assignedTo || updatedProject.assignedEditor;
+                if (assignedTo) {
+                    const notifTitle = 'Revision Needed! ⚠️';
+                    const notifBody = `Admin requested revision for: ${updatedProject.title || updatedProject.projectName || ''}`;
+
+                    global.sendPushNotification(assignedTo, { title: notifTitle, body: notifBody });
+
+                    // ✅ Mobile push to editor
+                    try {
+                        const editor = await User.findOne({
+                            $or: [{ name: assignedTo }, { email: assignedTo }],
+                            expoPushToken: { $ne: '' }
+                        });
+                        if (editor?.expoPushToken) {
+                            await sendExpoPush(editor.expoPushToken, notifTitle, notifBody, {
+                                projectId: updatedProject._id.toString(),
+                                type: 'revision_needed'
+                            });
+                        }
+                    } catch (e) { /* silent */ }
                 }
             }
             
-            // ৩. প্রজেক্টে যদি অন্য কোনো আপডেট আসে (যেমন কারেকশন নোট অ্যাড করা হলো)
-            // ফ্রন্টএন্ড থেকে যদি updatedBy পাঠানো হয় এবং সে যদি এডিটর না হয়, তাহলে এডিটরকে নোটিফিকেশন দেব
-            else if (req.body.updatedBy && req.body.updatedBy !== updatedProject.assignedTo) {
-                 global.sendPushNotification(updatedProject.assignedTo, {
-                     title: 'Project Updated 📝',
-                     body: `New update or correction added to your project: ${updatedProject.projectName || ''}`
-                 });
+            // ৩. অন্য কোনো আপডেট
+            else if (req.body.updatedBy && req.body.updatedBy !== (updatedProject.assignedTo || updatedProject.assignedEditor)) {
+                const assignedTo = updatedProject.assignedTo || updatedProject.assignedEditor;
+                if (assignedTo) {
+                    const notifTitle = 'Project Updated 📝';
+                    const notifBody = `Update on: ${updatedProject.title || updatedProject.projectName || ''}`;
+
+                    global.sendPushNotification(assignedTo, { title: notifTitle, body: notifBody });
+
+                    try {
+                        const editor = await User.findOne({
+                            $or: [{ name: assignedTo }, { email: assignedTo }],
+                            expoPushToken: { $ne: '' }
+                        });
+                        if (editor?.expoPushToken) {
+                            await sendExpoPush(editor.expoPushToken, notifTitle, notifBody, {
+                                projectId: updatedProject._id.toString(),
+                                type: 'project_updated'
+                            });
+                        }
+                    } catch (e) { /* silent */ }
+                }
             }
         }
 
