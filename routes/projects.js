@@ -4,20 +4,14 @@ const Project = require('../models/Project');
 const User = require('../models/User');
 
 // ✅ Expo Push Notification পাঠানোর হেল্পার ফাংশন
+// Expo Push API ব্যবহার করে — কোনো API key লাগে না, শুধু ইউজারের push token দরকার
 const sendExpoPush = async (expoPushToken, title, body, data = {}) => {
-    if (!expoPushToken || !expoPushToken.startsWith('ExponentPushToken')) {
-        console.log('❌ Invalid Expo Token:', expoPushToken);
-        return;
-    }
+    if (!expoPushToken || !expoPushToken.startsWith('ExponentPushToken')) return;
 
     try {
-        console.log(`🚀 Sending Mobile Push...`);
-        const response = await fetch('https://exp.host/--/api/v2/push/send', {
+        await fetch('https://exp.host/--/api/v2/push/send', {
             method: 'POST',
-            headers: { 
-                'Accept': 'application/json',
-                'Content-Type': 'application/json' 
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 to: expoPushToken,
                 title,
@@ -28,10 +22,8 @@ const sendExpoPush = async (expoPushToken, title, body, data = {}) => {
                 data
             })
         });
-        const result = await response.json();
-        console.log('✅ Mobile Push Result:', result);
     } catch (err) {
-        console.error('❌ Expo push error:', err.message);
+        console.error('Expo push error:', err.message);
     }
 };
 
@@ -55,7 +47,7 @@ router.get('/:id', async (req, res) => {
     }
 });
 
-// নতুন প্রজেক্ট অ্যাড করার API
+// নতুন প্রজেক্ট অ্যাড করার API — ✅ Expo Push + Self-assignment check
 router.post('/', async (req, res) => {
     try {
         const newProject = new Project(req.body);
@@ -66,6 +58,7 @@ router.post('/', async (req, res) => {
 
         // ================= Push Notification =================
         if (assignedTo) {
+
             // ✅ Self-Assignment Check: নিজে নিজেকে অ্যাসাইন করলে নোটিফিকেশন যাবে না
             if (createdBy && assignedTo === createdBy) {
                 console.log(`Self-assignment detected (${createdBy}) — skipping notification`);
@@ -73,23 +66,21 @@ router.post('/', async (req, res) => {
                 const notifTitle = 'New Project Assigned! 🚀';
                 const notifBody = `You have been assigned to: ${savedProject.title || savedProject.projectName || 'a new project'}`;
 
-                // ✅ ১. Web Push (Browser) — ক্র্যাশ ঠেকাতে সেফলি কল করা হলো
+                // ✅ ১. Web Push (Browser) — আগের সিস্টেম, এখনো কাজ করবে
                 if (global.sendPushNotification) {
-                    try {
-                        Promise.resolve(global.sendPushNotification(assignedTo, {
-                            title: notifTitle,
-                            body: notifBody
-                        })).catch(e => console.log('⚠️ Web push skipped (FCM error), but Mobile push will continue.'));
-                    } catch (e) {
-                        console.log('⚠️ Web push skipped.');
-                    }
+                    global.sendPushNotification(assignedTo, {
+                        title: notifTitle,
+                        body: notifBody
+                    });
                 }
 
-                // ✅ ২. Mobile Push (Expo/Android)
+                // ✅ ২. Mobile Push (Expo/Android) — নতুন সিস্টেম
+                // Editor এর email দিয়ে তার Expo push token খুঁজে নোটিফিকেশন পাঠানো
                 try {
+                    // assignedTo নাম বা ইমেইল হতে পারে — দুইটাই চেক
                     const editor = await User.findOne({
                         $or: [{ name: assignedTo }, { email: assignedTo }],
-                        expoPushToken: { $exists: true, $ne: '' }
+                        expoPushToken: { $ne: '' }
                     });
 
                     if (editor && editor.expoPushToken) {
@@ -97,11 +88,10 @@ router.post('/', async (req, res) => {
                             projectId: savedProject._id.toString(),
                             type: 'new_project'
                         });
-                    } else {
-                        console.log(`⚠️ No Expo Push Token found for ${assignedTo}`);
+                        console.log(`📱 Mobile push sent to ${editor.name}`);
                     }
                 } catch (pushErr) {
-                    console.log('❌ Mobile push lookup error:', pushErr.message);
+                    console.log('Mobile push lookup error:', pushErr.message);
                 }
             }
         }
@@ -112,7 +102,7 @@ router.post('/', async (req, res) => {
     }
 });
 
-// প্রজেক্ট আপডেট বা সাবমিট করার API (PATCH)
+// প্রজেক্ট আপডেট বা সাবমিট করার API (PATCH) — ✅ Expo Push যোগ
 router.patch('/:id', async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);
@@ -128,40 +118,29 @@ router.patch('/:id', async (req, res) => {
         }
 
         // ================= Push Notification =================
-        if (oldProject) {
+        if (oldProject && global.sendPushNotification) {
             
-            // হেল্পার ফাংশন — Web Push এবং Mobile Push একসাথে পাঠানোর জন্য
-            const triggerNotifications = async (targetUser, title, body, type) => {
-                // ১. Web Push
-                if (global.sendPushNotification) {
-                    try {
-                        Promise.resolve(global.sendPushNotification(targetUser, { title, body }))
-                            .catch(e => console.log('⚠️ Web push skipped.'));
-                    } catch (e) {}
-                }
-                // ২. Mobile Push
-                try {
-                    const userDb = await User.findOne({
-                        $or: [{ name: targetUser }, { email: targetUser }],
-                        expoPushToken: { $exists: true, $ne: '' }
-                    });
-                    if (userDb?.expoPushToken) {
-                        await sendExpoPush(userDb.expoPushToken, title, body, {
-                            projectId: updatedProject._id.toString(),
-                            type: type
-                        });
-                    } else {
-                        console.log(`⚠️ No Expo Push Token found for ${targetUser}`);
-                    }
-                } catch (e) { /* silent */ }
-            };
-
             // ১. এডিটর যদি কাজ জমা দেয় (Status changed to Submitted)
             if (req.body.status && req.body.status === 'Submitted' && oldProject.status !== 'Submitted') {
                 if (updatedProject.createdBy) {
-                    const title = 'Project Submitted! ✅';
-                    const body = `${updatedProject.assignedTo || updatedProject.assignedEditor || 'Editor'} has submitted: ${updatedProject.title || updatedProject.projectName || ''}`;
-                    await triggerNotifications(updatedProject.createdBy, title, body, 'project_submitted');
+                    const notifTitle = 'Project Submitted! ✅';
+                    const notifBody = `${updatedProject.assignedTo || updatedProject.assignedEditor || 'Editor'} has submitted: ${updatedProject.title || updatedProject.projectName || ''}`;
+
+                    global.sendPushNotification(updatedProject.createdBy, { title: notifTitle, body: notifBody });
+
+                    // ✅ Mobile push to admin/creator
+                    try {
+                        const creator = await User.findOne({
+                            $or: [{ name: updatedProject.createdBy }, { email: updatedProject.createdBy }],
+                            expoPushToken: { $ne: '' }
+                        });
+                        if (creator?.expoPushToken) {
+                            await sendExpoPush(creator.expoPushToken, notifTitle, notifBody, {
+                                projectId: updatedProject._id.toString(),
+                                type: 'project_submitted'
+                            });
+                        }
+                    } catch (e) { /* silent */ }
                 }
             } 
             
@@ -169,9 +148,24 @@ router.patch('/:id', async (req, res) => {
             else if (req.body.status && req.body.status === 'Revision' && oldProject.status !== 'Revision') {
                 const assignedTo = updatedProject.assignedTo || updatedProject.assignedEditor;
                 if (assignedTo) {
-                    const title = 'Revision Needed! ⚠️';
-                    const body = `Admin requested revision for: ${updatedProject.title || updatedProject.projectName || ''}`;
-                    await triggerNotifications(assignedTo, title, body, 'revision_needed');
+                    const notifTitle = 'Revision Needed! ⚠️';
+                    const notifBody = `Admin requested revision for: ${updatedProject.title || updatedProject.projectName || ''}`;
+
+                    global.sendPushNotification(assignedTo, { title: notifTitle, body: notifBody });
+
+                    // ✅ Mobile push to editor
+                    try {
+                        const editor = await User.findOne({
+                            $or: [{ name: assignedTo }, { email: assignedTo }],
+                            expoPushToken: { $ne: '' }
+                        });
+                        if (editor?.expoPushToken) {
+                            await sendExpoPush(editor.expoPushToken, notifTitle, notifBody, {
+                                projectId: updatedProject._id.toString(),
+                                type: 'revision_needed'
+                            });
+                        }
+                    } catch (e) { /* silent */ }
                 }
             }
             
@@ -179,9 +173,23 @@ router.patch('/:id', async (req, res) => {
             else if (req.body.updatedBy && req.body.updatedBy !== (updatedProject.assignedTo || updatedProject.assignedEditor)) {
                 const assignedTo = updatedProject.assignedTo || updatedProject.assignedEditor;
                 if (assignedTo) {
-                    const title = 'Project Updated 📝';
-                    const body = `Update on: ${updatedProject.title || updatedProject.projectName || ''}`;
-                    await triggerNotifications(assignedTo, title, body, 'project_updated');
+                    const notifTitle = 'Project Updated 📝';
+                    const notifBody = `Update on: ${updatedProject.title || updatedProject.projectName || ''}`;
+
+                    global.sendPushNotification(assignedTo, { title: notifTitle, body: notifBody });
+
+                    try {
+                        const editor = await User.findOne({
+                            $or: [{ name: assignedTo }, { email: assignedTo }],
+                            expoPushToken: { $ne: '' }
+                        });
+                        if (editor?.expoPushToken) {
+                            await sendExpoPush(editor.expoPushToken, notifTitle, notifBody, {
+                                projectId: updatedProject._id.toString(),
+                                type: 'project_updated'
+                            });
+                        }
+                    } catch (e) { /* silent */ }
                 }
             }
         }
