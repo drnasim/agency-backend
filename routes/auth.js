@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
-const { sendFcmAlarm } = require('../fcm');
+const { sendFcmAlarm, sendFcmNotification } = require('../fcm');
 
 // নতুন ইউজার/এডিটর রেজিস্টার করার API
 router.post('/register', async (req, res) => {
@@ -224,7 +224,7 @@ router.get('/debug-token', async (req, res) => {
     });
 });
 
-// ✅ DEBUG: নির্দিষ্ট email-এ test alarm পাঠান
+// ✅ DEBUG: data-only alarm (tests our JS handler + Notifee)
 router.post('/debug-ring', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
@@ -233,7 +233,22 @@ router.post('/debug-ring', async (req, res) => {
     if (!user.fcmToken) return res.status(400).json({ error: 'user has no fcmToken saved' });
     console.log(`[debug-ring] target=${user.name} token=${user.fcmToken.slice(0, 30)}...`);
     await sendFcmAlarm(user.fcmToken, 'Test Alarm', 'এটা একটা test message', { type: 'test' });
-    res.json({ message: 'sent', tokenPrefix: user.fcmToken.slice(0, 30) + '...' });
+    res.json({ message: 'sent (data-only)', tokenPrefix: user.fcmToken.slice(0, 30) + '...' });
+});
+
+// ✅ DEBUG: notification-style (tests if FCM delivery works at all; Android shows it directly)
+router.post('/debug-notify', async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'user not found' });
+    if (!user.fcmToken) return res.status(400).json({ error: 'user has no fcmToken saved' });
+    try {
+        const id = await sendFcmNotification(user.fcmToken, 'FCM Test', 'This is a plain notification');
+        res.json({ message: 'sent (notification-style)', id });
+    } catch (err) {
+        res.status(500).json({ error: err.message, code: err.code });
+    }
 });
 
 module.exports = router;

@@ -90,4 +90,27 @@ async function alarmUser(nameOrEmail, title, body, extra = {}) {
   }
 }
 
-module.exports = { sendFcmAlarm, alarmUser };
+// DEBUG: Send a notification-style message (Android system shows it directly,
+// no JS handler needed). Used to verify FCM delivery works at all.
+async function sendFcmNotification(fcmToken, title, body) {
+  if (!fcmToken) return;
+  const app = init();
+  if (!app) return;
+  try {
+    const id = await admin.messaging().send({
+      token: fcmToken,
+      notification: { title, body },
+      android: {
+        priority: 'high',
+        notification: { sound: 'default', channelId: 'pager-alarm' },
+      },
+    });
+    console.log(`✅ FCM notification accepted id=${id}`);
+    return id;
+  } catch (err) {
+    console.error('FCM notification error:', err.message, err.code);
+    throw err;
+  }
+}
+
+module.exports = { sendFcmAlarm, alarmUser, sendFcmNotification };
