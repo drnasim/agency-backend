@@ -19,8 +19,11 @@ const userSchema = new mongoose.Schema({
     // অ্যাকাউন্ট ডিলিট/ডিজেবল হলে false হবে — লগিন ব্লক হবে
     isActive: { type: Boolean, default: true },
 
-    // ✅ মোবাইল অ্যাপের Expo Push Token — Android নোটিফিকেশনের জন্য
-    expoPushToken: { type: String, default: '' }
+    // ✅ মোবাইল অ্যাপের Expo Push Token — (legacy, পুরনো build-এর জন্য রাখা)
+    expoPushToken: { type: String, default: '' },
+
+    // ✅ Firebase Cloud Messaging token — নতুন pager app (data-only push, killed-state delivery)
+    fcmToken: { type: String, default: '' }
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

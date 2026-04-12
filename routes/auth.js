@@ -184,21 +184,21 @@ router.get('/users', async (req, res) => {
     }
 });
 
-// ✅ মোবাইল অ্যাপ থেকে Expo Push Token সেভ করার API
-// অ্যাপে লগিন করার পর এই endpoint এ token পাঠানো হবে
+// ✅ মোবাইল Pager App থেকে FCM token সেভ করার API
+// অ্যাপ চালু হওয়ার সময় এই endpoint-এ token পাঠানো হয়।
+// পুরনো Expo build এখনো `expoPushToken` পাঠাতে পারে — backward compatible রাখা হলো।
 router.post('/push-token', async (req, res) => {
     try {
-        const { email, expoPushToken } = req.body;
-        if (!email || !expoPushToken) {
-            return res.status(400).json({ error: 'email and expoPushToken are required' });
+        const { email, fcmToken, expoPushToken } = req.body;
+        if (!email || (!fcmToken && !expoPushToken)) {
+            return res.status(400).json({ error: 'email and fcmToken (or expoPushToken) are required' });
         }
 
-        const user = await User.findOneAndUpdate(
-            { email },
-            { expoPushToken },
-            { new: true }
-        );
+        const update = {};
+        if (fcmToken) update.fcmToken = fcmToken;
+        if (expoPushToken) update.expoPushToken = expoPushToken;
 
+        const user = await User.findOneAndUpdate({ email }, update, { new: true });
         if (!user) return res.status(404).json({ error: 'User not found' });
 
         res.status(200).json({ message: 'Push token saved successfully', name: user.name });
