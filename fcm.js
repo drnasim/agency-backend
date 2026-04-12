@@ -68,7 +68,7 @@ async function sendFcmAlarm(fcmToken, title, body, extra = {}) {
       android: {
         priority: 'high',
         notification: {
-          channelId: 'pager-alarm',
+          channelId: 'pager-alarm-v2',
           sound: 'ringtone',
           priority: 'max',
           defaultVibrateTimings: false,
