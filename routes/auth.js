@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
-const bcrypt = require('bcryptjs'); 
+const bcrypt = require('bcryptjs');
+const { sendFcmAlarm } = require('../fcm');
 
 // নতুন ইউজার/এডিটর রেজিস্টার করার API
 router.post('/register', async (req, res) => {
@@ -205,6 +206,34 @@ router.post('/push-token', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// ✅ DEBUG: কোন user-এর কী token save আছে দেখুন
+router.get('/debug-token', async (req, res) => {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'email query required' });
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'user not found' });
+    res.json({
+        name: user.name,
+        email: user.email,
+        fcmToken: user.fcmToken || '(empty)',
+        fcmTokenPrefix: user.fcmToken ? user.fcmToken.slice(0, 30) + '...' : null,
+        fcmTokenLength: user.fcmToken?.length || 0,
+        expoPushToken: user.expoPushToken || '(empty)',
+    });
+});
+
+// ✅ DEBUG: নির্দিষ্ট email-এ test alarm পাঠান
+router.post('/debug-ring', async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'user not found' });
+    if (!user.fcmToken) return res.status(400).json({ error: 'user has no fcmToken saved' });
+    console.log(`[debug-ring] target=${user.name} token=${user.fcmToken.slice(0, 30)}...`);
+    await sendFcmAlarm(user.fcmToken, 'Test Alarm', 'এটা একটা test message', { type: 'test' });
+    res.json({ message: 'sent', tokenPrefix: user.fcmToken.slice(0, 30) + '...' });
 });
 
 module.exports = router;
