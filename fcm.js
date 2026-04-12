@@ -55,14 +55,12 @@ async function sendFcmAlarm(fcmToken, title, body, extra = {}) {
   }
 
   try {
-    await admin.messaging().send({
+    const messageId = await admin.messaging().send({
       token: fcmToken,
       data,
-      android: {
-        priority: 'high',
-        ttl: 0, // deliver immediately or drop — no late wake-ups
-      },
+      android: { priority: 'high' },
     });
+    console.log(`✅ FCM accepted id=${messageId}`);
   } catch (err) {
     console.error('FCM send error:', err.message);
     // Token no longer valid → clear it so we stop retrying
