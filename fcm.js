@@ -55,10 +55,27 @@ async function sendFcmAlarm(fcmToken, title, body, extra = {}) {
   }
 
   try {
+    // Hybrid message — Android OS shows the notification via our pre-created
+    // `pager-alarm` channel (bypassDnd + custom ringtone sound) even if JS
+    // handlers don't fire. If they do fire, Notifee adds full-screen looping.
     const messageId = await admin.messaging().send({
       token: fcmToken,
+      notification: {
+        title: data.title || 'New Project',
+        body: data.body || '',
+      },
       data,
-      android: { priority: 'high' },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'pager-alarm',
+          sound: 'ringtone',
+          priority: 'max',
+          defaultVibrateTimings: false,
+          vibrateTimingsMillis: [0, 1000, 500, 1000, 500, 1000],
+          visibility: 'public',
+        },
+      },
     });
     console.log(`✅ FCM accepted id=${messageId}`);
   } catch (err) {
