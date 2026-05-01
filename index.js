@@ -1,5 +1,5 @@
 require('dotenv').config();
-// Force IPv4 DNS resolution — Railway containers fail on IPv6 outbound (ENETUNREACH)
+// Force IPv4 DNS resolution — some hosted containers fail on IPv6 outbound (ENETUNREACH)
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
@@ -45,16 +45,6 @@ global.sendPushNotification = async (userName, payload) => {
     }
 };
 
-const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
-});
-
-// ✅ routes থেকে io access করার জন্য global এ expose করা
-global.io = io;
-
 const allowedOrigins = [
   'https://login.fortivusgroupllc.com',
   'https://fortivusgroupllc.com',
@@ -62,6 +52,17 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000'
 ];
+
+const io = new Server(server, {
+    cors: {
+        origin: allowedOrigins,
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
+
+// ✅ routes থেকে io access করার জন্য global এ expose করা
+global.io = io;
 
 app.use(cors({
   origin: function(origin, callback) {
