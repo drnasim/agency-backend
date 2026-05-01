@@ -55,7 +55,24 @@ const io = new Server(server, {
 // ✅ routes থেকে io access করার জন্য global এ expose করা
 global.io = io;
 
-app.use(cors());
+const allowedOrigins = [
+  'https://login.fortivusgroupllc.com',
+  'https://fortivusgroupllc.com',
+  'https://www.fortivusgroupllc.com',
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 app.get('/', (req, res) => {

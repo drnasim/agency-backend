@@ -241,7 +241,7 @@ router.post('/send', async (req, res) => {
         const trackingPixelId = uuidv4();
         const sentAt = new Date();
         const followUpDueAt = new Date(sentAt.getTime() + 3 * 24 * 60 * 60 * 1000);
-        const BACKEND_URL = process.env.BACKEND_URL || 'https://agency-backend-production-55bd.up.railway.app';
+        const BACKEND_URL = process.env.BACKEND_URL || 'https://agency-backend-geae.onrender.com';
         const unsubUrl = `${BACKEND_URL}/api/mail/unsubscribe/${encodeURIComponent(toEmail)}`;
 
         const bodyWithPixel = body
