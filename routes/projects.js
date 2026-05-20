@@ -53,7 +53,47 @@ router.post('/', async (req, res) => {
     }
 });
 
-// প্রজেক্ট আপডেট — revision হলে editor-কে ring দাও
+// প্রজেক্ট আপডেট (PUT) — Frontend থেকে Quick Editor চেঞ্জ বা ফুল আপডেটের জন্য নতুন যুক্ত করা হলো
+router.put('/:id', async (req, res) => {
+    try {
+        const oldProject = await Project.findById(req.params.id);
+        
+        const updatedProject = await Project.findByIdAndUpdate(
+            req.params.id,
+            { $set: req.body },
+            { new: true }
+        );
+
+        if (!updatedProject) return res.status(404).json({ error: 'Project not found' });
+
+        // যদি লিস্ট থেকে এডিটর পরিবর্তন করা হয়, তবে নতুন এডিটরকে নোটিফিকেশন পাঠাবে
+        if (oldProject) {
+            const oldEditor = oldProject.assignedTo || oldProject.assignedEditor;
+            const newEditor = updatedProject.assignedTo || updatedProject.assignedEditor;
+
+            // এডিটর চেঞ্জ হয়েছে কিনা চেক করা হচ্ছে
+            if (newEditor && String(oldEditor) !== String(newEditor)) {
+                const title = 'Project Re-assigned';
+                const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
+
+                if (global.sendPushNotification) {
+                    global.sendPushNotification(newEditor, { title, body });
+                }
+
+                await alarmUser(newEditor, title, body, {
+                    projectId: updatedProject._id.toString(),
+                    type: 'new_project',
+                });
+            }
+        }
+
+        res.status(200).json(updatedProject);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// প্রজেক্ট আপডেট (PATCH) — revision হলে editor-কে ring দাও
 router.patch('/:id', async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);
