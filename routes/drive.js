@@ -22,7 +22,10 @@ const upload = multer({ storage: diskStorage, limits: { fileSize: 100 * 1024 * 1
 // ==============================================================
 async function getOrCreateFolder(drive, folderName, parentFolderId) {
     try {
-        const query = `mimeType='application/vnd.google-apps.folder' and name='${folderName}' and trashed=false ${parentFolderId ? `and '${parentFolderId}' in parents` : ''}`;
+        // ✅ Fix: ফোল্ডারের নামে সিঙ্গেল কোট (') থাকলে সেটা গুগল ড্রাইভ এপিআইতে এরর দেয়, তাই সেটা এস্কেপ করা হলো
+        const safeFolderName = folderName.replace(/'/g, "\\'");
+        
+        const query = `mimeType='application/vnd.google-apps.folder' and name='${safeFolderName}' and trashed=false ${parentFolderId ? `and '${parentFolderId}' in parents` : ''}`;
         const response = await drive.files.list({
             q: query,
             fields: 'files(id, name)',
@@ -40,7 +43,7 @@ async function getOrCreateFolder(drive, folderName, parentFolderId) {
         };
 
         const folder = await drive.files.create({
-            resource: fileMetadata,
+            requestBody: fileMetadata, // ✅ Fix: 'resource' এর বদলে 'requestBody' ব্যবহার করতে হবে (নতুন গুগল এপিআই রুল)
             fields: 'id'
         });
 
@@ -95,15 +98,14 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             return res.status(400).json({ error: "No file uploaded" });
         }
 
-        // সিকিউর ভাবে চাবিগুলো নেওয়া হচ্ছে
+        // সিকিউর ভাবে চাবিগুলো নেওয়া হচ্ছে
         const { drive, mainFolderId } = getAuth();
 
         // অটোমেটিক ক্লায়েন্ট ও প্রজেক্ট ফোল্ডার তৈরি হবে
         const clientFolderId = await getOrCreateFolder(drive, clientName, mainFolderId);
         const projectFolderId = await getOrCreateFolder(drive, projectName, clientFolderId);
 
-        // ✅ OOM Fix: Buffer/PassThrough এর বদলে সরাসরি fs.createReadStream ব্যবহার
-        // ফাইল ডিস্ক থেকে ছোট ছোট chunk এ পড়ে সরাসরি Google Drive এ পাঠাচ্ছে
+        // ✅ OOM Fix: Buffer এর বদলে সরাসরি fs.createReadStream ব্যবহার
         const fileStream = fs.createReadStream(tempFilePath);
         
         const response = await drive.files.create({
@@ -114,8 +116,11 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             },
             media: {
                 mimeType: file.mimetype,
-                body: fileStream  // ✅ আগে bufferStream ছিল — এখন fileStream
+                body: fileStream  
             }
+        }, {
+            // ✅ Fix: বড় ফাইলের জন্য গুগল ড্রাইভের resumable upload সাপোর্ট অ্যাড করা হলো
+            resumable: true
         });
         
         const fileUrl = `https://drive.google.com/file/d/${response.data.id}/view`;
@@ -137,14 +142,14 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 // ==============================================================
-// ৯০ দিন পর অটো-ডিলিট হওয়ার সিস্টেম (প্রতিদিন রাত ১২টায় চেক করবে)
+// ৯০ দিন পর অটো-ডিলিট হওয়ার সিস্টেম (প্রতিদিন রাত ১২টায় চেক করবে)
 // ==============================================================
 cron.schedule('0 0 * * *', async () => {
     console.log("Running 90-day auto-delete check...");
     try {
         const { drive } = getAuth();
 
-        // ৯০ দিন আগের সময় বের করা
+        // ৯০ দিন আগের সময় বের করা
         const ninetyDaysAgo = new Date();
         ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
         const timeString = ninetyDaysAgo.toISOString();
