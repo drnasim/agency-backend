@@ -3,18 +3,49 @@ const router = express.Router();
 const Project = require('../models/Project');
 const { alarmUser } = require('../fcm');
 
-// সব প্রজেক্ট দেখার API
+// সব প্রজেক্ট দেখার API (পেজিনেশন সাপোর্ট সহ)
 router.get('/', async (req, res) => {
     try {
-        const projects = await Project.find().sort({ createdAt: -1 }).lean();
-        
-        // ফাইন্যান্স পেজে এডিটর ফিল্টারের জন্য ডাটা ম্যাপ করা হচ্ছে
+        const { page, limit } = req.query;
+
+        // যদি ফ্রন্টএন্ড থেকে page এবং limit না পাঠানো হয়, তবে আগের মতো সব ডাটা পাঠাবে (যাতে ফাইন্যান্স পেজ ঠিক থাকে)
+        if (!page || !limit) {
+            const projects = await Project.find().sort({ createdAt: -1 }).lean();
+            
+            // ফাইন্যান্স পেজে এডিটর ফিল্টারের জন্য ডাটা ম্যাপ করা হচ্ছে
+            const formattedProjects = projects.map(project => ({
+                ...project,
+                editor: project.editor || project.assignedTo || project.assignedEditor || 'Unassigned'
+            }));
+
+            return res.status(200).json(formattedProjects);
+        }
+
+        // যদি page এবং limit পাঠানো হয়, তবে ব্যাকএন্ড পেজিনেশন কাজ করবে
+        const pageNumber = parseInt(page);
+        const limitNumber = parseInt(limit);
+        const skip = (pageNumber - 1) * limitNumber;
+
+        // ডাটাবেস থেকে নির্দিষ্ট লিমিট অনুযায়ী ডাটা এবং মোট সংখ্যা বের করা
+        const totalProjects = await Project.countDocuments();
+        const projects = await Project.find()
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limitNumber)
+            .lean();
+
         const formattedProjects = projects.map(project => ({
             ...project,
             editor: project.editor || project.assignedTo || project.assignedEditor || 'Unassigned'
         }));
 
-        res.status(200).json(formattedProjects);
+        res.status(200).json({
+            projects: formattedProjects,
+            totalProjects,
+            totalPages: Math.ceil(totalProjects / limitNumber),
+            currentPage: pageNumber
+        });
+
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
