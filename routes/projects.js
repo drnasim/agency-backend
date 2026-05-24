@@ -6,8 +6,15 @@ const { alarmUser } = require('../fcm');
 // সব প্রজেক্ট দেখার API
 router.get('/', async (req, res) => {
     try {
-        const projects = await Project.find().sort({ createdAt: -1 });
-        res.status(200).json(projects);
+        const projects = await Project.find().sort({ createdAt: -1 }).lean();
+        
+        // ফাইন্যান্স পেজে এডিটর ফিল্টারের জন্য ডাটা ম্যাপ করা হচ্ছে
+        const formattedProjects = projects.map(project => ({
+            ...project,
+            editor: project.editor || project.assignedTo || project.assignedEditor || 'Unassigned'
+        }));
+
+        res.status(200).json(formattedProjects);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -15,7 +22,12 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
     try {
-        const project = await Project.findById(req.params.id);
+        const project = await Project.findById(req.params.id).lean();
+        
+        if (project) {
+            project.editor = project.editor || project.assignedTo || project.assignedEditor || 'Unassigned';
+        }
+
         res.status(200).json(project);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -53,7 +65,7 @@ router.post('/', async (req, res) => {
     }
 });
 
-// প্রজেক্ট আপডেট (PUT) — Frontend থেকে Quick Editor চেঞ্জ বা ফুল আপডেটের জন্য নতুন যুক্ত করা হলো
+// প্রজেক্ট আপডেট (PUT) — Frontend থেকে Quick Editor চেঞ্জ বা ফুল আপডেটের জন্য
 router.put('/:id', async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);

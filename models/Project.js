@@ -6,6 +6,7 @@ const projectSchema = new mongoose.Schema({
     projectType: { type: String },
     budget: { type: Number },
     assignedEditor: { type: String },
+    editor: { type: String }, // ফিল্টারিংয়ের জন্য নতুন যুক্ত করা হলো
     
     // নতুন মাল্টিপল রিসোর্স সিস্টেম
     resources: [{
