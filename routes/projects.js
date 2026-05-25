@@ -11,8 +11,11 @@ router.get('/', async (req, res) => {
         // ডাইনামিক ফিল্টার কুয়েরি তৈরি করা হচ্ছে
         const queryObj = {};
 
+        // ইউজারের রোল ছোট/বড় হাতের যাই হোক না কেন, সেটা চেক করার জন্য
+        const isEditorRole = role && role.toLowerCase() === 'editor';
+
         // এডিটরদের জন্য স্পেশাল রুল: তারা শুধু নির্দিষ্ট স্ট্যাটাসের প্রজেক্ট দেখতে পারবে
-        if (role === 'Editor') {
+        if (isEditorRole) {
             queryObj.status = { $in: ['Pending', 'In Progress', 'Under Review', 'Revision'] };
         } else if (status && status !== 'All') {
             // অ্যাডমিনদের জন্য নরমাল স্ট্যাটাস ফিল্টার
@@ -23,7 +26,7 @@ router.get('/', async (req, res) => {
         if (projectType && projectType !== 'All') queryObj.projectType = projectType;
         if (paymentStatus && paymentStatus !== 'All') queryObj.paymentStatus = paymentStatus;
         
-        // এডিটর ফিল্টারের জন্য একটু স্পেশাল লজিক, কারণ ডাটাবেসে কয়েকটা নামে সেভ থাকতে পারে
+        // এডিটর ফিল্টারের জন্য স্পেশাল লজিক, কারণ ডাটাবেসে কয়েকটা নামে সেভ থাকতে পারে
         if (editor && editor !== 'All') {
             queryObj.$or = [
                 { assignedEditor: editor },
