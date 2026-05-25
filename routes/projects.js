@@ -3,16 +3,33 @@ const router = express.Router();
 const Project = require('../models/Project');
 const { alarmUser } = require('../fcm');
 
-// সব প্রজেক্ট দেখার API (পেজিনেশন সাপোর্ট সহ)
+// সব প্রজেক্ট দেখার API (পেজিনেশন ও মাল্টিপল ফিল্টার সাপোর্ট সহ)
 router.get('/', async (req, res) => {
     try {
-        const { page, limit } = req.query;
+        const { page, limit, status, client, editor, projectType, paymentStatus } = req.query;
 
-        // যদি ফ্রন্টএন্ড থেকে page এবং limit না পাঠানো হয়, তবে আগের মতো সব ডাটা পাঠাবে (যাতে ফাইন্যান্স পেজ ঠিক থাকে)
+        // ডাইনামিক ফিল্টার কুয়েরি তৈরি করা হচ্ছে
+        const queryObj = {};
+        
+        if (status && status !== 'All') queryObj.status = status;
+        if (client && client !== 'All') queryObj.client = client;
+        if (projectType && projectType !== 'All') queryObj.projectType = projectType;
+        if (paymentStatus && paymentStatus !== 'All') queryObj.paymentStatus = paymentStatus;
+        
+        // এডিটর ফিল্টারের জন্য একটু স্পেশাল লজিক, কারণ ডাটাবেসে কয়েকটা নামে সেভ থাকতে পারে
+        if (editor && editor !== 'All') {
+            queryObj.$or = [
+                { assignedEditor: editor },
+                { editor: editor },
+                { assignedTo: editor }
+            ];
+        }
+
+        // যদি ফ্রন্টএন্ড থেকে page এবং limit না পাঠানো হয় (যাতে ফাইন্যান্স পেজ ঠিক থাকে)
         if (!page || !limit) {
-            const projects = await Project.find().sort({ createdAt: -1 }).lean();
+            const projects = await Project.find(queryObj).sort({ createdAt: -1 }).lean();
             
-            // ফাইন্যান্স পেজে এডিটর ফিল্টারের জন্য ডাটা ম্যাপ করা হচ্ছে
+            // ফ্রন্টএন্ডের জন্য এডিটর ফিল্ড ম্যাপ করা হচ্ছে
             const formattedProjects = projects.map(project => ({
                 ...project,
                 editor: project.editor || project.assignedTo || project.assignedEditor || 'Unassigned'
@@ -26,9 +43,9 @@ router.get('/', async (req, res) => {
         const limitNumber = parseInt(limit);
         const skip = (pageNumber - 1) * limitNumber;
 
-        // ডাটাবেস থেকে নির্দিষ্ট লিমিট অনুযায়ী ডাটা এবং মোট সংখ্যা বের করা
-        const totalProjects = await Project.countDocuments();
-        const projects = await Project.find()
+        // ফিল্টার অনুযায়ী ডাটাবেস থেকে নির্দিষ্ট লিমিটের ডাটা এবং মোট সংখ্যা বের করা
+        const totalProjects = await Project.countDocuments(queryObj);
+        const projects = await Project.find(queryObj)
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limitNumber)
