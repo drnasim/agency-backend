@@ -6,12 +6,19 @@ const { alarmUser } = require('../fcm');
 // সব প্রজেক্ট দেখার API (পেজিনেশন ও মাল্টিপল ফিল্টার সাপোর্ট সহ)
 router.get('/', async (req, res) => {
     try {
-        const { page, limit, status, client, editor, projectType, paymentStatus } = req.query;
+        const { page, limit, status, client, editor, projectType, paymentStatus, role } = req.query;
 
         // ডাইনামিক ফিল্টার কুয়েরি তৈরি করা হচ্ছে
         const queryObj = {};
+
+        // এডিটরদের জন্য স্পেশাল রুল: তারা শুধু নির্দিষ্ট স্ট্যাটাসের প্রজেক্ট দেখতে পারবে
+        if (role === 'Editor') {
+            queryObj.status = { $in: ['Pending', 'In Progress', 'Under Review', 'Revision'] };
+        } else if (status && status !== 'All') {
+            // অ্যাডমিনদের জন্য নরমাল স্ট্যাটাস ফিল্টার
+            queryObj.status = status;
+        }
         
-        if (status && status !== 'All') queryObj.status = status;
         if (client && client !== 'All') queryObj.client = client;
         if (projectType && projectType !== 'All') queryObj.projectType = projectType;
         if (paymentStatus && paymentStatus !== 'All') queryObj.paymentStatus = paymentStatus;
