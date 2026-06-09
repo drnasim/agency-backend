@@ -13,6 +13,16 @@ const expenseSchema = new mongoose.Schema({
 
 const Expense = mongoose.models.Expense || mongoose.model('Expense', expenseSchema);
 
+// Crypto Wallet Database Schema & Model
+const walletSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    address: { type: String, required: true },
+    network: { type: String, enum: ['BTC', 'ETH', 'SOL'], required: true },
+    createdAt: { type: Date, default: Date.now }
+});
+
+const Wallet = mongoose.models.Wallet || mongoose.model('Wallet', walletSchema);
+
 // আগের মাস বের করার হেল্পার ফাংশন
 const getPreviousMonth = (currentMonthStr) => {
     const [year, month] = currentMonthStr.split('-');
@@ -95,6 +105,45 @@ router.delete('/expenses/:id', async (req, res) => {
         const deletedExpense = await Expense.findByIdAndDelete(req.params.id);
         if (!deletedExpense) return res.status(404).json({ error: "Expense not found" });
         res.status(200).json({ message: "Expense deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- WALLET API ROUTES ---
+
+// GET /api/finance/wallets
+router.get('/wallets', async (req, res) => {
+    try {
+        const wallets = await Wallet.find().sort({ createdAt: -1 });
+        res.status(200).json(wallets);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST /api/finance/wallets
+router.post('/wallets', async (req, res) => {
+    try {
+        const { name, address, network } = req.body;
+        if (!name || !address || !network) {
+            return res.status(400).json({ error: "All fields are required" });
+        }
+
+        const newWallet = new Wallet({ name, address, network });
+        await newWallet.save();
+        res.status(201).json(newWallet);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// DELETE /api/finance/wallets/:id
+router.delete('/wallets/:id', async (req, res) => {
+    try {
+        const deletedWallet = await Wallet.findByIdAndDelete(req.params.id);
+        if (!deletedWallet) return res.status(404).json({ error: "Wallet not found" });
+        res.status(200).json({ message: "Wallet deleted successfully" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
