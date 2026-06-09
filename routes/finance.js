@@ -17,7 +17,8 @@ const Expense = mongoose.models.Expense || mongoose.model('Expense', expenseSche
 const walletSchema = new mongoose.Schema({
     name: { type: String, required: true },
     address: { type: String, required: true },
-    network: { type: String, enum: ['BTC', 'ETH', 'SOL'], required: true },
+    // 'BNB' ডাটাবেস স্কিমাতে যোগ করা হয়েছে
+    network: { type: String, enum: ['BTC', 'ETH', 'SOL', 'BNB'], required: true },
     createdAt: { type: Date, default: Date.now }
 });
 
