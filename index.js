@@ -112,6 +112,7 @@ const settingsRoutes = require('./routes/settings');
 const driveRoutes = require('./routes/drive');
 const chatRoutes = require('./routes/chat');
 const financeRoutes = require('./routes/finance');
+const cryptoRoutes = require('./routes/crypto');
 const uploadRoutes = require('./routes/upload'); // <--- Cloudflare R2 Upload Route
 const mailRoutes = require('./routes/mail');
 
@@ -123,6 +124,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/drive', driveRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/finance', financeRoutes);
+app.use('/api/crypto', cryptoRoutes);
 app.use('/api/upload', uploadRoutes); // <--- Cloudflare R2 Upload Route connected
 app.use('/api/mail', mailRoutes);
 
