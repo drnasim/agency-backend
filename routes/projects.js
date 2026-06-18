@@ -3,6 +3,74 @@ const router = express.Router();
 const Project = require('../models/Project');
 const { alarmUser } = require('../fcm');
 
+const buildProjectUpdate = (body, oldProject) => {
+    const update = { ...body };
+
+    if (update.status === 'Completed' && oldProject?.status !== 'Completed' && !update.completedAt) {
+        update.completedAt = new Date();
+    }
+
+    if (
+        oldProject?.status === 'Completed' &&
+        !oldProject.completedAt &&
+        !update.completedAt
+    ) {
+        update.completedAt = oldProject.completedDate || oldProject.createdAt || new Date();
+    }
+
+    return update;
+};
+
+const getAssignedEditor = (project) => {
+    const editor = project.assignedEditor || project.editor || project.assignedTo || '';
+    return String(editor).trim();
+};
+
+const getCompletedProjectDate = (project) => {
+    if (project.status !== 'Completed') return null;
+
+    if (project.completedAt) {
+        return { date: project.completedAt, source: 'completedAt' };
+    }
+
+    if (project.completedDate) {
+        return { date: project.completedDate, source: 'completedDate' };
+    }
+
+    if (project.createdAt) {
+        return { date: project.createdAt, source: 'legacyCreatedAt' };
+    }
+
+    return null;
+};
+
+const formatCompletedEditorProject = (project) => {
+    const completedDate = getCompletedProjectDate(project);
+    if (!completedDate) return null;
+
+    const editor = getAssignedEditor(project);
+    if (!editor || editor.toLowerCase() === 'unassigned') return null;
+
+    const date = new Date(completedDate.date);
+    if (Number.isNaN(date.getTime())) return null;
+
+    return {
+        _id: project._id,
+        title: project.title,
+        client: project.client,
+        projectType: project.projectType,
+        budget: Number(project.budget) || 0,
+        assignedEditor: editor,
+        editor,
+        status: project.status,
+        completedAt: date.toISOString(),
+        completedAtSource: completedDate.source,
+        hasRecordedCompletedAt: Boolean(project.completedAt || project.completedDate),
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt
+    };
+};
+
 // সব প্রজেক্ট দেখার API (পেজিনেশন ও মাল্টিপল ফিল্টার সাপোর্ট সহ)
 router.get('/', async (req, res) => {
     try {
@@ -78,6 +146,36 @@ router.get('/', async (req, res) => {
     }
 });
 
+router.get('/analytics/completed-editor-revenue', async (req, res) => {
+    try {
+        const projects = await Project.find({ status: 'Completed' }).sort({ createdAt: -1 }).lean();
+        const completedEditorProjects = projects
+            .map(formatCompletedEditorProject)
+            .filter(Boolean);
+
+        const totalValue = completedEditorProjects.reduce((sum, project) => sum + project.budget, 0);
+        const projectsWithRecordedCompletedAt = completedEditorProjects.filter(project => project.hasRecordedCompletedAt).length;
+
+        res.status(200).json({
+            source: 'projects',
+            statusField: 'status',
+            requiredStatus: 'Completed',
+            editorFields: ['assignedEditor', 'editor', 'assignedTo'],
+            dateFields: ['completedAt', 'completedDate'],
+            amountField: 'budget',
+            legacyDateFallback: 'createdAt',
+            excludesPaymentStatus: true,
+            totalProjects: completedEditorProjects.length,
+            totalValue,
+            projectsWithRecordedCompletedAt,
+            projectsUsingLegacyDateFallback: completedEditorProjects.length - projectsWithRecordedCompletedAt,
+            projects: completedEditorProjects
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 router.get('/:id', async (req, res) => {
     try {
         const project = await Project.findById(req.params.id).lean();
@@ -95,7 +193,12 @@ router.get('/:id', async (req, res) => {
 // নতুন প্রজেক্ট — editor-কে ring দাও
 router.post('/', async (req, res) => {
     try {
-        const newProject = new Project(req.body);
+        const projectPayload = { ...req.body };
+        if (projectPayload.status === 'Completed' && !projectPayload.completedAt) {
+            projectPayload.completedAt = new Date();
+        }
+
+        const newProject = new Project(projectPayload);
         const savedProject = await newProject.save();
 
         const assignedTo = savedProject.assignedTo || savedProject.assignedEditor;
@@ -127,10 +230,11 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);
+        const update = buildProjectUpdate(req.body, oldProject);
         
         const updatedProject = await Project.findByIdAndUpdate(
             req.params.id,
-            { $set: req.body },
+            { $set: update },
             { new: true }
         );
 
@@ -167,10 +271,11 @@ router.put('/:id', async (req, res) => {
 router.patch('/:id', async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);
+        const update = buildProjectUpdate(req.body, oldProject);
 
         const updatedProject = await Project.findByIdAndUpdate(
             req.params.id,
-            { $set: req.body },
+            { $set: update },
             { new: true }
         );
 

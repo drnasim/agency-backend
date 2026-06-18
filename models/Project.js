@@ -17,6 +17,7 @@ const projectSchema = new mongoose.Schema({
 
     status: { type: String, default: 'Pending' },
     paymentStatus: { type: String, default: 'Unpaid' },
+    completedAt: { type: Date },
     deadline: { type: Date },
     notes: { type: String },
     finalVideoLink: { type: String, default: '' },
