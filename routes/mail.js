@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
+const { ImapFlow } = require('imapflow');
+const { simpleParser } = require('mailparser');
 const { google } = require('googleapis');
 const { v4: uuidv4 } = require('uuid');
 
@@ -31,7 +33,19 @@ const PURELYMAIL_SMTP = {
     startTlsPort: 587
 };
 
+const PURELYMAIL_IMAP = {
+    host: 'imap.purelymail.com',
+    port: 993
+};
+
 const normalizeEmail = (email = '') => String(email).trim().toLowerCase();
+
+const normalizeSubjectForThread = (subject = '') => String(subject || '')
+    .replace(/^(\s*(re|fw|fwd)\s*:\s*)+/i, '')
+    .trim()
+    .toLowerCase();
+
+const getParsedAddress = (addressObj) => normalizeEmail(addressObj?.value?.[0]?.address || '');
 
 const getEmailDomain = (email = '') => {
     const parts = normalizeEmail(email).split('@');
@@ -105,6 +119,23 @@ const getRoles = (user) => {
     return Array.isArray(user.role) ? user.role : [user.role].filter(Boolean);
 };
 
+const getAssignedAccountsForSalesman = async (salesmanEmail) => {
+    const targets = await SalesTarget.find({ salesmanEmail: normalizeEmail(salesmanEmail) })
+        .populate('assignedAccounts')
+        .sort({ updatedAt: -1 });
+    const accountsById = new Map();
+
+    targets.forEach(target => {
+        (target.assignedAccounts || []).forEach(account => {
+            if (account?.isActive) {
+                accountsById.set(String(account._id), account);
+            }
+        });
+    });
+
+    return Array.from(accountsById.values());
+};
+
 const getAllowedAccountsForUser = async (userEmail) => {
     const normalizedUserEmail = normalizeEmail(userEmail);
     if (!normalizedUserEmail) {
@@ -126,8 +157,7 @@ const getAllowedAccountsForUser = async (userEmail) => {
     }
 
     if (hasMarketer) {
-        const target = await SalesTarget.findOne({ salesmanEmail: normalizedUserEmail }).populate('assignedAccounts');
-        const assignedAccounts = (target?.assignedAccounts || []).filter(account => account.isActive);
+        const assignedAccounts = await getAssignedAccountsForSalesman(normalizedUserEmail);
         return { allowedAccounts: assignedAccounts, user, roles };
     }
 
@@ -630,9 +660,8 @@ router.get('/accounts', async (req, res) => {
         const { salesmanEmail } = req.query;
         if (salesmanEmail) {
             // Marketer/Salesman: শুধু assigned accounts দেখাবে
-            const target = await SalesTarget.findOne({ salesmanEmail }).populate('assignedAccounts');
-            if (!target) return res.json([]);
-            return res.json(sanitizeAccounts(target.assignedAccounts || []));
+            const assignedAccounts = await getAssignedAccountsForSalesman(salesmanEmail);
+            return res.json(sanitizeAccounts(assignedAccounts));
         }
         // Admin: সব accounts
         const accounts = await EmailAccount.find().sort({ createdAt: -1 });
@@ -682,6 +711,58 @@ router.post('/accounts', async (req, res) => {
         });
         const saved = await account.save();
         res.status(201).json(sanitizeAccount(saved));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.put('/accounts/:id', async (req, res) => {
+    try {
+        const account = await EmailAccount.findById(req.params.id);
+        if (!account) return res.status(404).json({ error: 'Account not found' });
+        if (account.type === 'gmail') {
+            return res.status(400).json({ error: 'Gmail accounts must be managed through Google OAuth.' });
+        }
+
+        const {
+            label,
+            email,
+            host,
+            port,
+            user,
+            pass,
+            provider = account.provider || 'smtp',
+            smtpSecurity,
+            domain,
+            dailyLimit,
+            cooldownSeconds
+        } = req.body;
+        const credentials = account.credentials || {};
+
+        const normalizedEmail = normalizeEmail(email || account.email);
+        const normalizedProvider = provider === 'purelymail' ? 'purelymail' : 'smtp';
+        const selectedSecurity = smtpSecurity || account.smtpSecurity || credentials.security || (normalizedProvider === 'purelymail' ? 'ssl_tls' : 'starttls');
+        const selectedPort = Number(port) || Number(credentials.port) || (selectedSecurity === 'ssl_tls' ? PURELYMAIL_SMTP.sslPort : PURELYMAIL_SMTP.startTlsPort);
+        const selectedHost = normalizedProvider === 'purelymail' ? PURELYMAIL_SMTP.host : (host || credentials.host);
+
+        account.label = label || account.label;
+        account.email = normalizedEmail;
+        account.provider = normalizedProvider;
+        account.domain = domain || getEmailDomain(normalizedEmail);
+        account.smtpSecurity = selectedSecurity;
+        account.credentials = {
+            ...credentials,
+            host: selectedHost,
+            port: selectedPort,
+            user: user || credentials.user || normalizedEmail,
+            security: selectedSecurity
+        };
+        if (pass) account.credentials.pass = pass;
+        if (dailyLimit !== undefined) account.dailyLimit = Number(dailyLimit) || account.dailyLimit;
+        if (cooldownSeconds !== undefined) account.cooldownSeconds = Number(cooldownSeconds) || account.cooldownSeconds;
+
+        const saved = await account.save();
+        res.json(sanitizeAccount(saved));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -819,29 +900,172 @@ const sendViaGmailAPI = async (account, { to, subject, html }) => {
     return { messageId: response.data.id || '', threadId: response.data.threadId || '' };
 };
 
-// SMTP account → nodemailer (custom SMTP servers এর জন্য)
-const sendViaSmtp = async (account, { to, subject, html }) => {
+const buildSmtpTransportOptions = (account, override = {}) => {
     const port = Number(account.credentials.port) || 587;
     const security = account.smtpSecurity || account.credentials.security || (port === 465 ? 'ssl_tls' : 'starttls');
-    const transporter = nodemailer.createTransport({
-        host: account.credentials.host,
-        port,
-        secure: security === 'ssl_tls' || port === 465,
-        requireTLS: security === 'starttls',
+    const host = account.credentials.host;
+    const selectedPort = override.port || port;
+    const selectedSecurity = override.security || security;
+
+    return {
+        host,
+        port: selectedPort,
+        secure: selectedSecurity === 'ssl_tls' || selectedPort === 465,
+        requireTLS: selectedSecurity === 'starttls',
+        connectionTimeout: 20000,
+        greetingTimeout: 20000,
+        socketTimeout: 30000,
+        tls: { servername: host },
         auth: { user: account.credentials.user, pass: account.credentials.pass }
+    };
+};
+
+const shouldTrySmtpFallback = (err = {}) => {
+    const text = String(err.message || '').toLowerCase();
+    const code = String(err.code || '').toLowerCase();
+    return ['etimedout', 'esocket', 'econnreset', 'econnrefused'].includes(code)
+        || text.includes('timeout')
+        || text.includes('connection');
+};
+
+// SMTP account → nodemailer (custom SMTP servers এর জন্য)
+const sendViaSmtp = async (account, { to, subject, html }) => {
+    const attempts = [buildSmtpTransportOptions(account)];
+    if (account.provider === 'purelymail') {
+        attempts.push(buildSmtpTransportOptions(account, attempts[0].port === 465
+            ? { port: PURELYMAIL_SMTP.startTlsPort, security: 'starttls' }
+            : { port: PURELYMAIL_SMTP.sslPort, security: 'ssl_tls' }));
+    }
+
+    let lastErr;
+    for (let i = 0; i < attempts.length; i++) {
+        const transporter = nodemailer.createTransport(attempts[i]);
+        try {
+            const info = await transporter.sendMail({
+                from: `"${account.label}" <${account.email}>`,
+                to,
+                subject,
+                html
+            });
+            return { messageId: info.messageId || '', threadId: '' };
+        } catch (err) {
+            lastErr = err;
+            if (i === attempts.length - 1 || !shouldTrySmtpFallback(err)) break;
+        }
+    }
+
+    throw lastErr;
+};
+
+const getImapConfig = (account) => {
+    if (account.type === 'gmail') return null;
+    const credentials = account.credentials || {};
+    if (!credentials.user || !credentials.pass) return null;
+
+    if (account.provider === 'purelymail') {
+        return {
+            host: PURELYMAIL_IMAP.host,
+            port: PURELYMAIL_IMAP.port,
+            secure: true,
+            auth: { user: credentials.user, pass: credentials.pass }
+        };
+    }
+
+    if (credentials.imapHost) {
+        return {
+            host: credentials.imapHost,
+            port: Number(credentials.imapPort) || 993,
+            secure: credentials.imapSecure !== false,
+            auth: { user: credentials.imapUser || credentials.user, pass: credentials.imapPass || credentials.pass }
+        };
+    }
+
+    return null;
+};
+
+const markMatchingReplyLog = async ({ account, fromEmail, subject, messageId, receivedAt }) => {
+    if (!fromEmail || !subject) return null;
+    const subjectKey = normalizeSubjectForThread(subject);
+    const logs = await EmailLog.find({
+        from: account.email,
+        to: fromEmail,
+        replied: false,
+        status: { $nin: ['bounced', 'failed', 'blocked'] }
+    }).sort({ sentAt: -1 }).limit(20);
+
+    const match = logs.find(log =>
+        normalizeSubjectForThread(log.renderedSubject || log.subject) === subjectKey
+    );
+    if (!match) return null;
+
+    match.replied = true;
+    match.repliedAt = receivedAt;
+    match.status = 'replied';
+    match.threadId = match.threadId || messageId || '';
+    await match.save();
+    return match;
+};
+
+const fetchSmtpInboxForAccount = async (account, maxResults = 15) => {
+    const imapConfig = getImapConfig(account);
+    if (!imapConfig) return [];
+
+    const client = new ImapFlow({
+        ...imapConfig,
+        logger: false,
+        connectionTimeout: 20000,
+        greetingTimeout: 20000,
+        socketTimeout: 30000
     });
-    const info = await transporter.sendMail({
-        from: `"${account.label}" <${account.email}>`,
-        to,
-        subject,
-        html
-    });
-    return { messageId: info.messageId || '', threadId: '' };
+    const replies = [];
+
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+    try {
+        const total = Number(client.mailbox?.exists) || 0;
+        if (!total) return replies;
+        const start = Math.max(1, total - maxResults + 1);
+
+        for await (const message of client.fetch(`${start}:*`, { uid: true, source: true, envelope: true })) {
+            const parsed = await simpleParser(message.source);
+            const fromEmail = getParsedAddress(parsed.from);
+            const receivedAt = parsed.date || message.envelope?.date || new Date();
+            const messageId = parsed.messageId || `imap-${account._id}-${message.uid}`;
+            const body = parsed.html || parsed.textAsHtml || parsed.text || '';
+
+            await markMatchingReplyLog({
+                account,
+                fromEmail,
+                subject: parsed.subject || '',
+                messageId,
+                receivedAt
+            }).catch(() => {});
+
+            replies.push({
+                _id: `imap-${account._id}-${message.uid}`,
+                from: account.email,
+                to: parsed.from?.text || fromEmail,
+                subject: parsed.subject || '(No subject)',
+                body,
+                repliedAt: receivedAt,
+                threadId: messageId,
+                messageId,
+                account: account.email,
+                provider: resolveAccountProvider(account)
+            });
+        }
+    } finally {
+        lock.release();
+        await client.logout().catch(() => {});
+    }
+
+    return replies.sort((a, b) => new Date(b.repliedAt) - new Date(a.repliedAt)).slice(0, maxResults);
 };
 
 router.post('/send', async (req, res) => {
     const { templateId, isFollowUp, assignedTo, dryRun } = req.body;
     let preflight;
+    let senderSlotReserved = false;
     try {
         preflight = await runSendPreflight(req.body);
         if (preflight.payload) {
@@ -912,6 +1136,7 @@ router.post('/send', async (req, res) => {
             });
             return res.status(blocked.statusCode).json(blocked.payload);
         }
+        senderSlotReserved = true;
 
         const trackingPixelId = uuidv4();
         const sentAt = new Date();
@@ -1008,6 +1233,15 @@ router.post('/send', async (req, res) => {
             ).catch(() => {});
             await Lead.findOneAndUpdate({ email: toEmail }, { status: 'bounced' }).catch(() => {});
         }
+        if (senderSlotReserved && account?._id) {
+            const restoreLastSent = account.lastSentAt
+                ? { $set: { lastSentAt: account.lastSentAt } }
+                : { $unset: { lastSentAt: '' } };
+            await EmailAccount.updateOne(
+                { _id: account._id, sentToday: { $gt: 0 } },
+                { $inc: { sentToday: -1 }, ...restoreLastSent }
+            ).catch(() => {});
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -1070,23 +1304,32 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
             }
         }
 
-        const target = await SalesTarget.findOne({ salesmanEmail }).populate('assignedAccounts');
-
         // SalesTarget না থাকলে, User এর role চেক করো
         // Admin হলে সব accounts, অন্যথা খালি (strict isolation)
         let accountsToCheck;
-        if (target) {
-            accountsToCheck = target.assignedAccounts;
+        const assignedAccounts = await getAssignedAccountsForSalesman(salesmanEmail);
+        if (assignedAccounts.length) {
+            accountsToCheck = assignedAccounts;
         } else {
             const callerRoles = callerUser ? (Array.isArray(callerUser.role) ? callerUser.role : [callerUser.role]) : [];
             const isAdmin = callerRoles.includes('Admin');
-            accountsToCheck = isAdmin ? await EmailAccount.find({ type: 'gmail', isActive: true }) : [];
+            accountsToCheck = isAdmin ? await EmailAccount.find({ isActive: true }) : [];
         }
 
         const allReplies = [];
+        const smtpInboxReplies = [];
 
         for (const account of accountsToCheck) {
-            if (account.type !== 'gmail' || !account.credentials.refreshToken) continue;
+            if (account.type !== 'gmail') {
+                try {
+                    const replies = await fetchSmtpInboxForAccount(account);
+                    smtpInboxReplies.push(...replies);
+                } catch (smtpErr) {
+                    console.error(`SMTP inbox poll error for ${account.email}:`, smtpErr.message);
+                }
+                continue;
+            }
+            if (!account.credentials.refreshToken) continue;
             try {
                 const oauth2Client = new google.auth.OAuth2(
                     account.credentials.clientId || GOOGLE_CLIENT_ID,
@@ -1154,7 +1397,7 @@ router.get('/inbox/:salesmanEmail', async (req, res) => {
             replied: true
         }).sort({ repliedAt: -1 }).limit(15);
 
-        res.json({ gmailReplies: allReplies, smtpReplies });
+        res.json({ gmailReplies: allReplies, smtpReplies: [...smtpInboxReplies, ...smtpReplies].slice(0, 15) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
