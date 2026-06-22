@@ -17,6 +17,15 @@ const User = require('../models/User');
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5173/api/mail/oauth/callback';
+const PUBLIC_BACKEND_URL = 'https://agency-backend-geae.onrender.com';
+
+const getPublicBackendUrl = () => {
+    const configured = String(process.env.BACKEND_URL || '').trim().replace(/\/$/, '');
+    if (configured && /^https:\/\//i.test(configured) && !/localhost|127\.0\.0\.1/i.test(configured)) {
+        return configured;
+    }
+    return PUBLIC_BACKEND_URL;
+};
 
 // Week-based warm-up daily limit
 // Week 1 (1-7): 10, Week 2 (8-14): 20, Week 3 (15-21): 30, Week 4+ (22+): 50
@@ -39,6 +48,12 @@ const PURELYMAIL_IMAP = {
 };
 
 const normalizeEmail = (email = '') => String(email).trim().toLowerCase();
+const escapeHtml = (value = '') => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 const normalizeSubjectForThread = (subject = '') => String(subject || '')
     .replace(/^(\s*(re|fw|fwd)\s*:\s*)+/i, '')
@@ -51,6 +66,30 @@ const getEmailDomain = (email = '') => {
     const parts = normalizeEmail(email).split('@');
     return parts.length === 2 ? parts[1] : '';
 };
+
+const SOCIAL_LEAD_FIELDS = [
+    'facebook',
+    'instagram',
+    'telegram',
+    'whatsapp',
+    'linkedin',
+    'xTwitter',
+    'tiktok',
+    'otherSocial'
+];
+
+const LEAD_UPDATE_FIELDS = [
+    'firstName',
+    'lastName',
+    'name',
+    'email',
+    'company',
+    'website',
+    'domain',
+    'youtubeChannel',
+    'niche',
+    ...SOCIAL_LEAD_FIELDS
+];
 
 const inferDomainFromWebsite = (value = '') => {
     const raw = String(value || '').trim();
@@ -68,6 +107,8 @@ const inferDomainFromWebsite = (value = '') => {
 const normalizeLeadInput = (input = {}) => {
     const lead = { ...input };
     if (lead.email) lead.email = normalizeEmail(lead.email);
+    if (lead.twitter !== undefined && lead.xTwitter === undefined) lead.xTwitter = lead.twitter;
+    if (lead.x !== undefined && lead.xTwitter === undefined) lead.xTwitter = lead.x;
     if (lead.note !== undefined && lead.notes === undefined) lead.notes = lead.note;
     if (lead.notes !== undefined && lead.note === undefined) lead.note = lead.notes;
 
@@ -78,8 +119,14 @@ const normalizeLeadInput = (input = {}) => {
         lead.name = [lead.firstName, lead.lastName].filter(Boolean).join(' ');
     }
     if (!lead.domain) lead.domain = inferDomainFromWebsite(lead.website) || getEmailDomain(lead.email);
+    LEAD_UPDATE_FIELDS.concat(['note', 'notes']).forEach(field => {
+        if (typeof lead[field] === 'string') lead[field] = lead[field].trim();
+    });
     return lead;
 };
+
+const hasLeadDetail = (lead = {}) => ['email', 'website', 'youtubeChannel', 'note', 'notes', ...SOCIAL_LEAD_FIELDS]
+    .some(field => String(lead[field] || '').trim());
 
 const sanitizeCredentials = (credentials = {}) => ({
     host: credentials.host || '',
@@ -206,16 +253,89 @@ const getShortcodeValues = (lead = {}, account = {}) => {
         youtubeChannel: lead.youtubeChannel || '',
         niche: lead.niche || '',
         note: getLeadNote(lead),
+        facebook: lead.facebook || '',
+        instagram: lead.instagram || '',
+        telegram: lead.telegram || '',
+        whatsapp: lead.whatsapp || '',
+        linkedin: lead.linkedin || '',
+        xTwitter: lead.xTwitter || lead.twitter || '',
+        twitter: lead.xTwitter || lead.twitter || '',
+        tiktok: lead.tiktok || '',
+        otherSocial: lead.otherSocial || '',
         senderName: account.label || '',
         senderEmail: account.email || ''
     };
 };
 
+const SHORTCODE_FIELDS = [
+    'firstName',
+    'lastName',
+    'name',
+    'company',
+    'email',
+    'website',
+    'domain',
+    'youtubeChannel',
+    'niche',
+    'note',
+    'facebook',
+    'instagram',
+    'telegram',
+    'whatsapp',
+    'linkedin',
+    'xTwitter',
+    'twitter',
+    'tiktok',
+    'otherSocial',
+    'senderName',
+    'senderEmail'
+];
+
 const renderShortcodes = (text = '', lead = {}, account = {}) => {
     const values = getShortcodeValues(lead, account);
+    const shortcodePattern = new RegExp(`\\{(${SHORTCODE_FIELDS.join('|')})\\}`, 'g');
     return String(text || '').replace(/\{\{\s*(name|company|niche|website)\s*\}\}/gi, (_, key) => values[key] || '')
-        .replace(/\{(firstName|lastName|name|company|email|website|domain|youtubeChannel|niche|note|senderName|senderEmail)\}/g, (_, key) => values[key] || '');
+        .replace(shortcodePattern, (_, key) => values[key] || '');
 };
+
+const appendInlineStyle = (tag, styleText) => {
+    if (!styleText) return tag;
+    const additions = styleText.split(';').map(part => part.trim()).filter(Boolean);
+    if (!additions.length) return tag;
+
+    if (/style\s*=/.test(tag)) {
+        return tag.replace(/style\s*=\s*(["'])(.*?)\1/i, (_, quote, existing) => {
+            const missing = additions.filter(rule => {
+                const property = rule.split(':')[0].trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                return !new RegExp(`(^|;)\\s*${property}\\s*:`, 'i').test(existing);
+            });
+            const separator = existing.trim() && missing.length ? ';' : '';
+            return `style=${quote}${existing.trim()}${separator}${missing.join(';')}${quote}`;
+        });
+    }
+
+    return tag.replace(/>$/, ` style="${additions.join(';')}">`);
+};
+
+const inlineEmailListStyles = (html = '') => String(html || '')
+    .replace(/<ul\b[^>]*>/gi, tag => appendInlineStyle(tag, 'margin:0 0 12px 22px;padding-left:18px;list-style-type:disc;list-style-position:outside'))
+    .replace(/<ol\b[^>]*>/gi, tag => appendInlineStyle(tag, 'margin:0 0 12px 22px;padding-left:18px;list-style-type:decimal;list-style-position:outside'))
+    .replace(/<li\b[^>]*>/gi, tag => appendInlineStyle(tag, 'margin:0 0 6px 0;padding-left:2px'));
+
+const renderEmailBody = (text = '', lead = {}, account = {}) => inlineEmailListStyles(renderShortcodes(text, lead, account));
+
+const htmlToPlainText = (html = '') => String(html || '')
+    .replace(/<li\b[^>]*>/gi, '- ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|ul|ol|h[1-6])>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 
 const getBlockedLeadStatus = (lead) => {
     const status = String(lead?.status || '').toLowerCase();
@@ -500,7 +620,7 @@ const runSendPreflight = async (reqBody) => {
             lead,
             toEmail,
             renderedSubject: renderShortcodes(rawSubject, lead || { email: toEmail }, {}),
-            renderedBody: renderShortcodes(rawBody, lead || { email: toEmail }, {}),
+            renderedBody: renderEmailBody(rawBody, lead || { email: toEmail }, {}),
             blockedReason: recipientSafety.blockedReason,
             statusCode: 400,
             selection,
@@ -528,7 +648,7 @@ const runSendPreflight = async (reqBody) => {
                 lead,
                 toEmail,
                 renderedSubject: renderShortcodes(rawSubject, lead || { email: toEmail }, {}),
-                renderedBody: renderShortcodes(rawBody, lead || { email: toEmail }, {}),
+                renderedBody: renderEmailBody(rawBody, lead || { email: toEmail }, {}),
                 blockedReason,
                 statusCode: accountReports.length ? getBlockedStatusCode(accountReports.flatMap(report => report.reasons)) : 403,
                 selection,
@@ -552,7 +672,7 @@ const runSendPreflight = async (reqBody) => {
                 lead,
                 toEmail,
                 renderedSubject: renderShortcodes(rawSubject, lead || { email: toEmail }, {}),
-                renderedBody: renderShortcodes(rawBody, lead || { email: toEmail }, {}),
+                renderedBody: renderEmailBody(rawBody, lead || { email: toEmail }, {}),
                 blockedReason,
                 statusCode: 403,
                 selection,
@@ -569,7 +689,7 @@ const runSendPreflight = async (reqBody) => {
                 reason: blockedReason
             });
             const renderedSubject = renderShortcodes(rawSubject, lead || { email: toEmail }, selectedReport.account);
-            const renderedBody = renderShortcodes(rawBody, lead || { email: toEmail }, selectedReport.account);
+            const renderedBody = renderEmailBody(rawBody, lead || { email: toEmail }, selectedReport.account);
             return makeBlockedResponse({
                 reqBody,
                 account: selectedReport.account,
@@ -589,7 +709,7 @@ const runSendPreflight = async (reqBody) => {
     const account = selectedReport.account;
     const leadForRender = lead || { email: toEmail };
     const renderedSubject = renderShortcodes(rawSubject, leadForRender, account);
-    const renderedBody = renderShortcodes(rawBody, leadForRender, account);
+    const renderedBody = renderEmailBody(rawBody, leadForRender, account);
     const selectionReason = autoSender
         ? `Auto-selected oldest eligible sender (${account.email}).`
         : `Manual sender ${account.email} passed access, daily, warm-up, cooldown, and suppression checks.`;
@@ -848,7 +968,7 @@ const buildRawEmail = ({ fromName, fromEmail, to, subject, html }) => {
     const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
     const htmlB64 = Buffer.from(html, 'utf-8').toString('base64');
-    const textB64 = Buffer.from(html.replace(/<[^>]*>/g, ''), 'utf-8').toString('base64');
+    const textB64 = Buffer.from(htmlToPlainText(html), 'utf-8').toString('base64');
 
     const raw = [
         `From: "${fromName}" <${fromEmail}>`,
@@ -1062,6 +1182,20 @@ const fetchSmtpInboxForAccount = async (account, maxResults = 15) => {
     return replies.sort((a, b) => new Date(b.repliedAt) - new Date(a.repliedAt)).slice(0, maxResults);
 };
 
+const buildUnsubscribeFooter = (unsubUrl) => `
+<br><br>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:18px;border-top:1px solid #e5e7eb">
+  <tr>
+    <td align="center" style="padding:16px 0 0 0;color:#6b7280;font-family:Arial,sans-serif;font-size:12px;line-height:18px">
+      <p style="margin:0 0 10px 0;color:#6b7280">Do not want to receive these emails?</p>
+      <a href="${unsubUrl}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;border-radius:6px;padding:9px 14px;font-weight:700;font-size:12px">Unsubscribe</a>
+      <p style="margin:10px 0 0 0;color:#9ca3af;font-size:11px">
+        Or open this link: <a href="${unsubUrl}" style="color:#6b7280;text-decoration:underline">unsubscribe</a>
+      </p>
+    </td>
+  </tr>
+</table>`;
+
 router.post('/send', async (req, res) => {
     const { templateId, isFollowUp, assignedTo, dryRun } = req.body;
     let preflight;
@@ -1141,11 +1275,11 @@ router.post('/send', async (req, res) => {
         const trackingPixelId = uuidv4();
         const sentAt = new Date();
         const followUpDueAt = new Date(sentAt.getTime() + 3 * 24 * 60 * 60 * 1000);
-        const BACKEND_URL = process.env.BACKEND_URL || 'https://agency-backend-geae.onrender.com';
+        const BACKEND_URL = getPublicBackendUrl();
         const unsubUrl = `${BACKEND_URL}/api/mail/unsubscribe/${encodeURIComponent(toEmail)}`;
 
         const bodyWithPixel = renderedBody
-            + `<br><br><hr style="border:none;border-top:1px solid #eee;margin:16px 0"><p style="color:#aaa;font-size:11px;text-align:center;margin:0">Don't want these emails? <a href="${unsubUrl}" style="color:#aaa;text-decoration:underline">Unsubscribe</a></p>`
+            + buildUnsubscribeFooter(unsubUrl)
             + `<img src="${BACKEND_URL}/api/mail/track/${trackingPixelId}" width="1" height="1" style="display:none;" />`;
 
         // Gmail API বা SMTP দিয়ে পাঠানো
@@ -1481,10 +1615,40 @@ router.get('/leads', async (req, res) => {
 
 router.post('/leads', async (req, res) => {
     try {
-        const lead = new Lead(normalizeLeadInput(req.body));
+        const normalizedLead = normalizeLeadInput(req.body);
+        if (!normalizedLead.name) {
+            return res.status(400).json({ error: 'Lead name is required.' });
+        }
+        if (!hasLeadDetail(normalizedLead)) {
+            return res.status(400).json({ error: 'Add at least one lead detail besides the name.' });
+        }
+        if (!normalizedLead.email) {
+            return res.status(400).json({ error: 'Lead email is required from the email composer.' });
+        }
+
+        const existing = await Lead.findOne({ email: normalizedLead.email });
+        if (existing) {
+            return res.json({
+                ...existing.toObject(),
+                duplicate: true,
+                message: 'Lead already exists for this email.'
+            });
+        }
+
+        const lead = new Lead(normalizedLead);
         const saved = await lead.save();
         res.status(201).json(saved);
     } catch (err) {
+        if (err.code === 11000 && req.body?.email) {
+            const existing = await Lead.findOne({ email: normalizeEmail(req.body.email) });
+            if (existing) {
+                return res.json({
+                    ...existing.toObject(),
+                    duplicate: true,
+                    message: 'Lead already exists for this email.'
+                });
+            }
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -1728,14 +1892,17 @@ router.get('/logs/:id', async (req, res) => {
 
 router.get('/unsubscribe/:email', async (req, res) => {
     try {
-        const email = decodeURIComponent(req.params.email);
+        const email = normalizeEmail(decodeURIComponent(req.params.email));
+        if (!email) {
+            return res.status(400).send('<!DOCTYPE html><html><head><title>Unsubscribe Failed</title></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:460px;text-align:center;padding:24px"><h1 style="font-size:24px;margin:0 0 8px">Unsubscribe failed</h1><p style="margin:0;color:#6b7280">The email address was missing or invalid.</p></main></body></html>');
+        }
         await Lead.findOneAndUpdate({ email }, { status: 'unsubscribed' });
         await Blacklist.findOneAndUpdate(
             { email },
-            { email, domain: email.split('@')[1] || '', reason: 'unsubscribed' },
+            { email, domain: getEmailDomain(email), reason: 'unsubscribed', addedAt: new Date() },
             { upsert: true }
         );
-        res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title></head><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f9fafb"><div style="text-align:center"><div style="font-size:48px">✉️</div><h2 style="color:#374151">You have been unsubscribed</h2><p style="color:#6b7280">You will no longer receive emails from us.</p></div></body></html>`);
+        res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:480px;text-align:center;padding:28px"><div style="width:48px;height:48px;border-radius:999px;background:#dcfce7;color:#166534;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:24px">✓</div><h1 style="font-size:26px;margin:0 0 10px">You have been unsubscribed</h1><p style="font-size:15px;line-height:22px;margin:0;color:#6b7280">${escapeHtml(email)} will no longer receive outreach emails from us.</p></main></body></html>`);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1746,8 +1913,7 @@ router.get('/unsubscribe/:email', async (req, res) => {
 router.patch('/leads/:id', async (req, res) => {
     try {
         const update = {};
-        const leadFields = ['firstName', 'lastName', 'name', 'email', 'company', 'website', 'domain', 'youtubeChannel', 'niche'];
-        for (const field of leadFields) {
+        for (const field of LEAD_UPDATE_FIELDS) {
             if (req.body[field] !== undefined) update[field] = req.body[field];
         }
         if (req.body.note !== undefined) {
