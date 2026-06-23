@@ -1030,6 +1030,7 @@ const buildSmtpTransportOptions = (account, override = {}) => {
     return {
         host,
         port: selectedPort,
+        family: 4,
         secure: selectedSecurity === 'ssl_tls' || selectedPort === 465,
         requireTLS: selectedSecurity === 'starttls',
         connectionTimeout: 20000,
@@ -1050,14 +1051,23 @@ const shouldTrySmtpFallback = (err = {}) => {
 
 // SMTP account → nodemailer (custom SMTP servers এর জন্য)
 const sendViaSmtp = async (account, { to, subject, html }) => {
-    const attempts = [buildSmtpTransportOptions(account)];
+    const attempts = account.provider === 'purelymail'
+        ? [
+            buildSmtpTransportOptions(account, { port: PURELYMAIL_SMTP.startTlsPort, security: 'starttls' }),
+            buildSmtpTransportOptions(account, { port: PURELYMAIL_SMTP.sslPort, security: 'ssl_tls' })
+        ]
+        : [buildSmtpTransportOptions(account)];
+
     if (account.provider === 'purelymail') {
-        attempts.push(buildSmtpTransportOptions(account, attempts[0].port === 465
-            ? { port: PURELYMAIL_SMTP.startTlsPort, security: 'starttls' }
-            : { port: PURELYMAIL_SMTP.sslPort, security: 'ssl_tls' }));
+        const configured = buildSmtpTransportOptions(account);
+        const hasConfiguredAttempt = attempts.some(attempt =>
+            attempt.port === configured.port && attempt.secure === configured.secure
+        );
+        if (!hasConfiguredAttempt) attempts.push(configured);
     }
 
     let lastErr;
+    const attemptErrors = [];
     for (let i = 0; i < attempts.length; i++) {
         const transporter = nodemailer.createTransport(attempts[i]);
         try {
@@ -1070,8 +1080,26 @@ const sendViaSmtp = async (account, { to, subject, html }) => {
             return { messageId: info.messageId || '', threadId: '' };
         } catch (err) {
             lastErr = err;
+            attemptErrors.push({
+                host: attempts[i].host,
+                port: attempts[i].port,
+                security: attempts[i].secure ? 'ssl_tls' : (attempts[i].requireTLS ? 'starttls' : 'none'),
+                code: err.code || '',
+                message: err.message || ''
+            });
             if (i === attempts.length - 1 || !shouldTrySmtpFallback(err)) break;
         }
+    }
+
+    if (attemptErrors.length > 1) {
+        const summary = attemptErrors
+            .map(item => `${item.host}:${item.port}/${item.security}${item.code ? ` ${item.code}` : ''}`)
+            .join(', ');
+        const err = new Error(`SMTP delivery failed after trying ${summary}. Last error: ${lastErr?.message || 'Unknown SMTP error'}`);
+        err.code = lastErr?.code;
+        err.responseCode = lastErr?.responseCode;
+        err.attempts = attemptErrors;
+        throw err;
     }
 
     throw lastErr;
@@ -1132,6 +1160,7 @@ const fetchSmtpInboxForAccount = async (account, maxResults = 15) => {
 
     const client = new ImapFlow({
         ...imapConfig,
+        family: 4,
         logger: false,
         connectionTimeout: 20000,
         greetingTimeout: 20000,
