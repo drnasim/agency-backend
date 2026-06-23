@@ -16,7 +16,6 @@ const User = require('../models/User');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5173/api/mail/oauth/callback';
 const PUBLIC_BACKEND_URL = 'https://agency-backend-geae.onrender.com';
 
 const getPublicBackendUrl = () => {
@@ -26,6 +25,23 @@ const getPublicBackendUrl = () => {
     }
     return PUBLIC_BACKEND_URL;
 };
+
+const getGoogleRedirectUri = () => {
+    const configured = String(process.env.GOOGLE_REDIRECT_URI || '').trim();
+    if (configured) {
+        try {
+            const url = new URL(configured);
+            if (url.hostname !== 'agency-backend-production-55bd.up.railway.app') {
+                return configured;
+            }
+        } catch {
+            // Fall back to the current backend URL below.
+        }
+    }
+    return `${getPublicBackendUrl()}/api/mail/oauth/callback`;
+};
+
+const GOOGLE_REDIRECT_URI = getGoogleRedirectUri();
 
 // Week-based warm-up daily limit
 // Week 1 (1-7): 10, Week 2 (8-14): 20, Week 3 (15-21): 30, Week 4+ (22+): 50
