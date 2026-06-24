@@ -5,6 +5,11 @@ const projectSchema = new mongoose.Schema({
     client: { type: String },
     projectType: { type: String },
     budget: { type: Number },
+    budgetType: { type: String, default: 'Fixed Budget' },
+    perMinuteRate: { type: Number, default: 0 },
+    durationMinutes: { type: Number, default: 0 },
+    durationSeconds: { type: Number, default: 0 },
+    billableMinutes: { type: Number, default: 0 },
     assignedEditor: { type: String },
     editor: { type: String }, // ফিল্টারিংয়ের জন্য নতুন যুক্ত করা হলো
     
