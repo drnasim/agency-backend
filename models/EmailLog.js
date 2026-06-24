@@ -29,7 +29,9 @@ const emailLogSchema = new mongoose.Schema({
     replied: { type: Boolean, default: false },
     repliedAt: { type: Date },
     followUpDueAt: { type: Date },
-    trackingPixelId: { type: String, unique: true, sparse: true }
+    trackingPixelId: { type: String, unique: true, sparse: true },
+    unsubscribeCode: { type: String, unique: true, sparse: true },
+    unsubscribedAt: { type: Date }
 }, { timestamps: true });
 
 module.exports = mongoose.model('EmailLog', emailLogSchema);

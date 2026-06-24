@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
@@ -17,6 +18,7 @@ const User = require('../models/User');
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const PUBLIC_BACKEND_URL = 'https://agency-backend-geae.onrender.com';
+const PUBLIC_UNSUBSCRIBE_BASE_URL = 'https://fortivusgroupllc.com';
 
 const getPublicBackendUrl = () => {
     const configured = String(process.env.BACKEND_URL || '').trim().replace(/\/$/, '');
@@ -24,6 +26,14 @@ const getPublicBackendUrl = () => {
         return configured;
     }
     return PUBLIC_BACKEND_URL;
+};
+
+const getPublicUnsubscribeBaseUrl = () => {
+    const configured = String(process.env.UNSUBSCRIBE_BASE_URL || '').trim().replace(/\/$/, '');
+    if (configured && /^https:\/\/fortivusgroupllc\.com$/i.test(configured)) {
+        return configured;
+    }
+    return PUBLIC_UNSUBSCRIBE_BASE_URL;
 };
 
 const getGoogleRedirectUri = () => {
@@ -111,6 +121,10 @@ const refreshDailyCountersForAccounts = async (accounts = [], now = new Date()) 
 };
 
 const isValidEmail = (email = '') => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+const normalizeUnsubscribeCode = (code = '') => String(code || '').trim();
+const isValidUnsubscribeCode = (code = '') => /^[A-Za-z0-9_-]{32,128}$/.test(code);
+const generateUnsubscribeCode = () => crypto.randomBytes(32).toString('base64url');
 
 const escapeHtml = (value = '') => String(value)
     .replace(/&/g, '&amp;')
@@ -1394,10 +1408,11 @@ router.post('/send', async (req, res) => {
         senderSlotReserved = true;
 
         const trackingPixelId = uuidv4();
+        const unsubscribeCode = generateUnsubscribeCode();
         const sentAt = new Date();
         const followUpDueAt = new Date(sentAt.getTime() + 3 * 24 * 60 * 60 * 1000);
         const BACKEND_URL = getPublicBackendUrl();
-        const unsubUrl = `${BACKEND_URL}/api/mail/unsubscribe/${encodeURIComponent(toEmail)}`;
+        const unsubUrl = `${getPublicUnsubscribeBaseUrl()}/unsubscribe/${unsubscribeCode}`;
 
         const bodyWithPixel = renderedBody
             + buildUnsubscribeFooter(unsubUrl)
@@ -1428,7 +1443,8 @@ router.post('/send', async (req, res) => {
             accountId: account._id,
             provider: resolveAccountProvider(account),
             senderName: account.label,
-            senderEmail: account.email
+            senderEmail: account.email,
+            unsubscribeCode
         });
         await log.save();
 
@@ -2013,26 +2029,65 @@ router.get('/logs/:id', async (req, res) => {
 
 // ====================== EMAIL UNSUBSCRIBE ======================
 
-router.get('/unsubscribe/:email', async (req, res) => {
+const renderUnsubscribePage = ({ title, message, ok }) => `<!DOCTYPE html><html><head><title>${escapeHtml(title)}</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:480px;text-align:center;padding:28px"><div style="width:48px;height:48px;border-radius:999px;background:${ok ? '#dcfce7' : '#fee2e2'};color:${ok ? '#166534' : '#991b1b'};display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:24px">${ok ? '&#10003;' : '!'}</div><h1 style="font-size:26px;margin:0 0 10px">${escapeHtml(title)}</h1><p style="font-size:15px;line-height:22px;margin:0;color:#6b7280">${escapeHtml(message)}</p></main></body></html>`;
+
+const unsubscribeByCode = async (code) => {
+    const unsubscribeCode = normalizeUnsubscribeCode(code);
+    if (!isValidUnsubscribeCode(unsubscribeCode)) {
+        return { ok: false, statusCode: 404, message: 'This unsubscribe link is invalid or expired.' };
+    }
+
+    const log = await EmailLog.findOne({ unsubscribeCode });
+    const email = normalizeEmail(log?.to || '');
+    if (!log || !email || !isValidEmail(email)) {
+        return { ok: false, statusCode: 404, message: 'This unsubscribe link is invalid or expired.' };
+    }
+
+    const unsubscribedAt = new Date();
+    await Lead.findOneAndUpdate(
+        { email },
+        { $set: { status: 'unsubscribed' } }
+    );
+    await Blacklist.findOneAndUpdate(
+        { email },
+        { $set: { email, domain: getEmailDomain(email), reason: 'unsubscribed', addedAt: unsubscribedAt } },
+        { upsert: true }
+    );
+    await EmailLog.updateOne(
+        { _id: log._id },
+        { $set: { unsubscribedAt } }
+    );
+
+    return { ok: true, statusCode: 200, message: 'You have been unsubscribed. This address will no longer receive outreach emails from us.' };
+};
+
+router.post('/unsubscribe/:code', async (req, res) => {
     try {
-        const email = normalizeEmail(decodeURIComponent(req.params.email));
-        if (!email || !isValidEmail(email)) {
-            return res.status(400).send('<!DOCTYPE html><html><head><title>Unsubscribe Failed</title></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:460px;text-align:center;padding:24px"><h1 style="font-size:24px;margin:0 0 8px">Unsubscribe failed</h1><p style="margin:0;color:#6b7280">The email address was missing or invalid.</p></main></body></html>');
-        }
-        const unsubscribedAt = new Date();
-        await Lead.findOneAndUpdate(
-            { email },
-            { $set: { status: 'unsubscribed' } }
-        );
-        await Blacklist.findOneAndUpdate(
-            { email },
-            { $set: { email, domain: getEmailDomain(email), reason: 'unsubscribed', addedAt: unsubscribedAt } },
-            { upsert: true }
-        );
-        res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-        res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:480px;text-align:center;padding:28px"><div style="width:48px;height:48px;border-radius:999px;background:#dcfce7;color:#166534;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:24px">✓</div><h1 style="font-size:26px;margin:0 0 10px">You have been unsubscribed</h1><p style="font-size:15px;line-height:22px;margin:0;color:#6b7280">${escapeHtml(email)} will no longer receive outreach emails from us.</p></main></body></html>`);
+        const result = await unsubscribeByCode(req.params.code);
+        res.status(result.statusCode).json({
+            ok: result.ok,
+            message: result.message
+        });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+router.get('/unsubscribe/:code', async (req, res) => {
+    try {
+        const result = await unsubscribeByCode(req.params.code);
+        res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+        res.status(result.statusCode).send(renderUnsubscribePage({
+            title: result.ok ? 'You have been unsubscribed' : 'Unsubscribe link unavailable',
+            message: result.message,
+            ok: result.ok
+        }));
+    } catch (err) {
+        res.status(500).send(renderUnsubscribePage({
+            title: 'Unsubscribe failed',
+            message: 'Please try again later.',
+            ok: false
+        }));
     }
 });
 
