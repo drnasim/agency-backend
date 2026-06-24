@@ -501,7 +501,18 @@ const buildAccountReport = (account, now = new Date(), extraReasons = []) => {
 
 const getRecipientSafety = async ({ toEmail, lead }) => {
     const toDomain = getEmailDomain(toEmail);
-    const blocked = await Blacklist.findOne({ $or: [{ email: toEmail }, { domain: toDomain }] });
+    const blacklistClauses = [{ email: toEmail }];
+    if (toDomain) {
+        blacklistClauses.push({
+            domain: toDomain,
+            $or: [
+                { email: { $exists: false } },
+                { email: null },
+                { email: '' }
+            ]
+        });
+    }
+    const blocked = await Blacklist.findOne({ $or: blacklistClauses });
     const blockedLeadStatus = getBlockedLeadStatus(lead);
     const warnings = [];
 
