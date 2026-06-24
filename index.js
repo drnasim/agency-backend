@@ -15,6 +15,29 @@ const EmailAccount = require('./models/EmailAccount');
 const app = express();
 const server = http.createServer(app); 
 
+const DAILY_LIMIT_TIMEZONE = process.env.DAILY_LIMIT_TIMEZONE || process.env.TZ || 'UTC';
+
+const getDailyLimitDateKey = (date = new Date(), timeZone = DAILY_LIMIT_TIMEZONE) => {
+    const buildKey = (selectedTimeZone) => {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: selectedTimeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).formatToParts(date).reduce((acc, part) => {
+            acc[part.type] = part.value;
+            return acc;
+        }, {});
+        return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+
+    try {
+        return buildKey(timeZone);
+    } catch {
+        return buildKey('UTC');
+    }
+};
+
 // ================= Web Push (VAPID) Setup =================
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U';
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '178fJbYV518x3fHmsG1yC_kQ1J6U2Y324Q_K-R8BfI0';
@@ -231,7 +254,8 @@ const getWarmupLimit = (day) => {
 
 cron.schedule('0 0 * * *', async () => {
     try {
-        await EmailAccount.updateMany({}, { sentToday: 0 });
+        const todayKey = getDailyLimitDateKey();
+        await EmailAccount.updateMany({}, { sentToday: 0, sentTodayDate: todayKey });
 
         // warmupEnabled accounts: warmupDay++ এবং dailyLimit auto-update
         const warmupAccounts = await EmailAccount.find({ warmupEnabled: true });

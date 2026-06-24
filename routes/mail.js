@@ -64,6 +64,54 @@ const PURELYMAIL_IMAP = {
 };
 
 const normalizeEmail = (email = '') => String(email).trim().toLowerCase();
+const DAILY_LIMIT_TIMEZONE = process.env.DAILY_LIMIT_TIMEZONE || process.env.TZ || 'UTC';
+
+const getDailyLimitDateKey = (date = new Date(), timeZone = DAILY_LIMIT_TIMEZONE) => {
+    const buildKey = (selectedTimeZone) => {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: selectedTimeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).formatToParts(date).reduce((acc, part) => {
+            acc[part.type] = part.value;
+            return acc;
+        }, {});
+        return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+
+    try {
+        return buildKey(timeZone);
+    } catch {
+        return buildKey('UTC');
+    }
+};
+
+const getEffectiveSentToday = (account = {}, now = new Date()) => {
+    const todayKey = getDailyLimitDateKey(now);
+    return account.sentTodayDate === todayKey ? Number(account.sentToday) || 0 : 0;
+};
+
+const refreshDailyCountersForAccounts = async (accounts = [], now = new Date()) => {
+    const todayKey = getDailyLimitDateKey(now);
+    const staleAccounts = accounts.filter(account => account?._id && account.sentTodayDate !== todayKey);
+    if (!staleAccounts.length) return accounts;
+
+    await EmailAccount.updateMany(
+        { _id: { $in: staleAccounts.map(account => account._id) }, sentTodayDate: { $ne: todayKey } },
+        { $set: { sentToday: 0, sentTodayDate: todayKey } }
+    );
+
+    staleAccounts.forEach(account => {
+        account.sentToday = 0;
+        account.sentTodayDate = todayKey;
+    });
+
+    return accounts;
+};
+
+const isValidEmail = (email = '') => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
 const escapeHtml = (value = '') => String(value)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -165,6 +213,9 @@ const sanitizeAccount = (account) => {
     const data = account.toObject ? account.toObject() : { ...account };
     data.provider = resolveAccountProvider(data);
     data.credentials = sanitizeCredentials(data.credentials || {});
+    const todayKey = getDailyLimitDateKey();
+    data.sentToday = getEffectiveSentToday(data);
+    data.sentTodayDate = data.sentTodayDate === todayKey ? data.sentTodayDate : todayKey;
     return data;
 };
 
@@ -196,7 +247,9 @@ const getAssignedAccountsForSalesman = async (salesmanEmail) => {
         });
     });
 
-    return Array.from(accountsById.values());
+    const assignedAccounts = Array.from(accountsById.values());
+    await refreshDailyCountersForAccounts(assignedAccounts);
+    return assignedAccounts;
 };
 
 const getAllowedAccountsForUser = async (userEmail) => {
@@ -216,7 +269,9 @@ const getAllowedAccountsForUser = async (userEmail) => {
     const hasEditor = roles.includes('Editor');
 
     if ((hasAdmin && !hasEditor) || (hasAdmin && hasMarketer)) {
-        return { allowedAccounts: await EmailAccount.find({ isActive: true }), user, roles };
+        const allowedAccounts = await EmailAccount.find({ isActive: true });
+        await refreshDailyCountersForAccounts(allowedAccounts);
+        return { allowedAccounts, user, roles };
     }
 
     if (hasMarketer) {
@@ -374,7 +429,7 @@ const getAccountLastSentTime = (account = {}) => account.lastSentAt
 
 const getAccountSafetyState = (account = {}, now = new Date()) => {
     const reasons = [];
-    const sentToday = Number(account.sentToday) || 0;
+    const sentToday = getEffectiveSentToday(account, now);
     const dailyLimit = Number.isFinite(Number(account.dailyLimit)) ? Number(account.dailyLimit) : 40;
     const warmupDay = Number(account.warmupDay) || 1;
     const warmupLimit = account.warmupEnabled ? getWarmupLimit(warmupDay) : null;
@@ -501,7 +556,7 @@ const chooseEligibleAccount = (reports = []) => {
     return eligible.sort((a, b) => {
         const sentDiff = getAccountLastSentTime(a.account) - getAccountLastSentTime(b.account);
         if (sentDiff !== 0) return sentDiff;
-        const todayDiff = (Number(a.account.sentToday) || 0) - (Number(b.account.sentToday) || 0);
+        const todayDiff = getEffectiveSentToday(a.account) - getEffectiveSentToday(b.account);
         if (todayDiff !== 0) return todayDiff;
         return Math.random() - 0.5;
     })[0];
@@ -764,10 +819,17 @@ const runSendPreflight = async (reqBody) => {
 
 const reserveSenderSlot = async (account, checks = {}) => {
     const reservationAt = new Date();
+    const todayKey = getDailyLimitDateKey(reservationAt);
     const effectiveLimit = Number.isFinite(Number(checks.effectiveLimit))
         ? Number(checks.effectiveLimit)
         : Number(account.dailyLimit) || 40;
     const cooldownSeconds = Number(checks.cooldown?.seconds) || 0;
+
+    await EmailAccount.updateOne(
+        { _id: account._id, sentTodayDate: { $ne: todayKey } },
+        { $set: { sentToday: 0, sentTodayDate: todayKey } }
+    );
+
     const filter = {
         _id: account._id,
         isActive: true,
@@ -784,7 +846,7 @@ const reserveSenderSlot = async (account, checks = {}) => {
 
     return EmailAccount.findOneAndUpdate(
         filter,
-        { $inc: { sentToday: 1 }, $set: { lastSentAt: reservationAt } },
+        { $inc: { sentToday: 1 }, $set: { lastSentAt: reservationAt, sentTodayDate: todayKey } },
         { new: true }
     );
 };
@@ -801,6 +863,7 @@ router.get('/accounts', async (req, res) => {
         }
         // Admin: সব accounts
         const accounts = await EmailAccount.find().sort({ createdAt: -1 });
+        await refreshDailyCountersForAccounts(accounts);
         res.json(sanitizeAccounts(accounts));
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -843,6 +906,7 @@ router.post('/accounts', async (req, res) => {
                 security: selectedSecurity
             },
             dailyLimit: dailyLimit ? Number(dailyLimit) : undefined,
+            sentTodayDate: getDailyLimitDateKey(),
             cooldownSeconds: cooldownSeconds ? Number(cooldownSeconds) : undefined
         });
         const saved = await account.save();
@@ -966,7 +1030,8 @@ router.get('/oauth/callback', async (req, res) => {
                     refreshToken: tokens.refresh_token,
                     clientId: GOOGLE_CLIENT_ID,
                     clientSecret: GOOGLE_CLIENT_SECRET
-                }
+                },
+                sentTodayDate: getDailyLimitDateKey()
             });
             await account.save();
         }
@@ -1788,6 +1853,7 @@ router.delete('/templates/:id', async (req, res) => {
 router.get('/targets', async (req, res) => {
     try {
         const targets = await SalesTarget.find().populate('assignedAccounts').sort({ createdAt: -1 });
+        await refreshDailyCountersForAccounts(targets.flatMap(target => target.assignedAccounts || []));
         res.json(targets.map(sanitizeTarget));
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1852,6 +1918,7 @@ router.get('/admin/stats', async (req, res) => {
         tomorrow.setDate(tomorrow.getDate() + 1);
 
         const targets = await SalesTarget.find().populate('assignedAccounts');
+        await refreshDailyCountersForAccounts(targets.flatMap(target => target.assignedAccounts || []));
         const summaries = await Promise.all(targets.map(async (t) => {
             const [sentToday, repliedToday, newReplies] = await Promise.all([
                 EmailLog.countDocuments(sentCountFilter({ assignedTo: t.salesmanEmail, sentAt: { $gte: today, $lt: tomorrow } })),
@@ -1938,15 +2005,20 @@ router.get('/logs/:id', async (req, res) => {
 router.get('/unsubscribe/:email', async (req, res) => {
     try {
         const email = normalizeEmail(decodeURIComponent(req.params.email));
-        if (!email) {
+        if (!email || !isValidEmail(email)) {
             return res.status(400).send('<!DOCTYPE html><html><head><title>Unsubscribe Failed</title></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:460px;text-align:center;padding:24px"><h1 style="font-size:24px;margin:0 0 8px">Unsubscribe failed</h1><p style="margin:0;color:#6b7280">The email address was missing or invalid.</p></main></body></html>');
         }
-        await Lead.findOneAndUpdate({ email }, { status: 'unsubscribed' });
+        const unsubscribedAt = new Date();
+        await Lead.findOneAndUpdate(
+            { email },
+            { $set: { status: 'unsubscribed' } }
+        );
         await Blacklist.findOneAndUpdate(
             { email },
-            { email, domain: getEmailDomain(email), reason: 'unsubscribed', addedAt: new Date() },
+            { $set: { email, domain: getEmailDomain(email), reason: 'unsubscribed', addedAt: unsubscribedAt } },
             { upsert: true }
         );
+        res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
         res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9fafb;color:#374151"><main style="max-width:480px;text-align:center;padding:28px"><div style="width:48px;height:48px;border-radius:999px;background:#dcfce7;color:#166534;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:24px">✓</div><h1 style="font-size:26px;margin:0 0 10px">You have been unsubscribed</h1><p style="font-size:15px;line-height:22px;margin:0;color:#6b7280">${escapeHtml(email)} will no longer receive outreach emails from us.</p></main></body></html>`);
     } catch (err) {
         res.status(500).json({ error: err.message });

@@ -16,6 +16,7 @@ const emailAccountSchema = new mongoose.Schema({
     credentials: { type: Object, default: {} },
     dailyLimit: { type: Number, default: 40 },
     sentToday: { type: Number, default: 0 },
+    sentTodayDate: { type: String, default: '' },
     warmupEnabled: { type: Boolean, default: false },
     warmupDay: { type: Number, default: 1 },
     cooldownSeconds: { type: Number, default: 120 },
