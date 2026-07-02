@@ -1,7 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const Project = require('../models/Project');
+const User = require('../models/User');
 const { alarmUser } = require('../fcm');
+const { resolveNotificationRecipient } = require('../utils/notificationRecipients');
+
+const REVIEW_STATUSES = new Set(['Submitted', 'Under Review']);
 
 const buildProjectUpdate = (body, oldProject) => {
     const update = { ...body };
@@ -24,6 +28,54 @@ const buildProjectUpdate = (body, oldProject) => {
 const getAssignedEditor = (project) => {
     const editor = project.assignedEditor || project.editor || project.assignedTo || '';
     return String(editor).trim();
+};
+
+const uniqueIdentityList = (items = []) => (
+    [...new Set(items.map(item => String(item || '').trim()).filter(Boolean))]
+);
+
+const getProjectNotificationUrl = (project) => (
+    project?._id ? `/project/${project._id.toString()}` : '/projects'
+);
+
+const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
+    if (!recipient) return fallback;
+    const resolved = await resolveNotificationRecipient(recipient);
+    return resolved.employee?.name || resolved.user?.name || resolved.reference || fallback;
+};
+
+const notifyProjectRecipients = async (recipients, title, body, project, type) => {
+    const projectId = project?._id?.toString();
+    const payload = { title, body, url: getProjectNotificationUrl(project) };
+    const extra = { type };
+    if (projectId) extra.projectId = projectId;
+
+    for (const recipient of uniqueIdentityList(recipients)) {
+        if (global.sendPushNotification) {
+            await global.sendPushNotification(recipient, payload);
+        }
+
+        await alarmUser(recipient, title, body, extra);
+    }
+};
+
+const notifyProjectRecipient = async (recipient, title, body, project, type) => {
+    await notifyProjectRecipients([recipient], title, body, project, type);
+};
+
+const getAdminNotificationRecipients = async () => {
+    const admins = await User.find({
+        role: 'Admin',
+        isActive: { $ne: false }
+    }).select('name email').lean();
+
+    return uniqueIdentityList(admins.flatMap(admin => [admin.email, admin.name]));
+};
+
+const getSubmissionNotificationRecipients = async (project) => {
+    const creatorRecipients = uniqueIdentityList([project.createdByEmail, project.createdBy]);
+    if (creatorRecipients.length > 0) return creatorRecipients;
+    return getAdminNotificationRecipients();
 };
 
 const getCompletedProjectDate = (project) => {
@@ -201,23 +253,14 @@ router.post('/', async (req, res) => {
         const newProject = new Project(projectPayload);
         const savedProject = await newProject.save();
 
-        const assignedTo = savedProject.assignedTo || savedProject.assignedEditor;
+        const assignedTo = getAssignedEditor(savedProject);
         const createdBy = req.body.createdBy || '';
 
         if (assignedTo && !(createdBy && assignedTo === createdBy)) {
             const title = 'New Project Assigned';
             const body = `${savedProject.title || savedProject.projectName || 'A new project'} has been assigned to you.`;
 
-            // Browser (web-push)
-            if (global.sendPushNotification) {
-                global.sendPushNotification(assignedTo, { title, body });
-            }
-
-            // Mobile (FCM data-only → full-screen alarm)
-            await alarmUser(assignedTo, title, body, {
-                projectId: savedProject._id.toString(),
-                type: 'new_project',
-            });
+            await notifyProjectRecipient(assignedTo, title, body, savedProject, 'new_project');
         }
 
         res.status(201).json(savedProject);
@@ -242,22 +285,15 @@ router.put('/:id', async (req, res) => {
 
         // যদি লিস্ট থেকে এডিটর পরিবর্তন করা হয়, তবে নতুন এডিটরকে নোটিফিকেশন পাঠাবে
         if (oldProject) {
-            const oldEditor = oldProject.assignedTo || oldProject.assignedEditor;
-            const newEditor = updatedProject.assignedTo || updatedProject.assignedEditor;
+            const oldEditor = getAssignedEditor(oldProject);
+            const newEditor = getAssignedEditor(updatedProject);
 
             // এডিটর চেঞ্জ হয়েছে কিনা চেক করা হচ্ছে
             if (newEditor && String(oldEditor) !== String(newEditor)) {
                 const title = 'Project Re-assigned';
                 const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
 
-                if (global.sendPushNotification) {
-                    global.sendPushNotification(newEditor, { title, body });
-                }
-
-                await alarmUser(newEditor, title, body, {
-                    projectId: updatedProject._id.toString(),
-                    type: 'new_project',
-                });
+                await notifyProjectRecipient(newEditor, title, body, updatedProject, 'new_project');
             }
         }
 
@@ -283,16 +319,27 @@ router.patch('/:id', async (req, res) => {
         if (!oldProject) return res.status(200).json(updatedProject);
 
         const projName = updatedProject.title || updatedProject.projectName || '';
-        const assignedTo = updatedProject.assignedTo || updatedProject.assignedEditor;
+        const assignedTo = getAssignedEditor(updatedProject);
+        const oldEditor = getAssignedEditor(oldProject);
 
-        // 1. Editor submitted → notify admin (browser only, admin usually on desktop)
-        if (req.body.status === 'Submitted' && oldProject.status !== 'Submitted') {
-            if (updatedProject.createdBy && global.sendPushNotification) {
-                global.sendPushNotification(updatedProject.createdBy, {
-                    title: 'Project Submitted',
-                    body: `${assignedTo || 'Editor'} submitted: ${projName}`,
-                });
-            }
+        if (assignedTo && String(oldEditor) !== String(assignedTo)) {
+            const title = 'Project Re-assigned';
+            const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
+
+            await notifyProjectRecipient(assignedTo, title, body, updatedProject, 'new_project');
+        }
+
+        // 1. Editor submitted → notify the project creator, or admins for legacy projects.
+        if (REVIEW_STATUSES.has(req.body.status) && !REVIEW_STATUSES.has(oldProject.status)) {
+            const recipients = await getSubmissionNotificationRecipients(updatedProject);
+            const editorName = await getRecipientDisplayName(assignedTo);
+            await notifyProjectRecipients(
+                recipients,
+                'Project Submitted',
+                `${editorName} submitted: ${projName}`,
+                updatedProject,
+                'project_submitted'
+            );
         }
         // 2. Admin requested revision → RING THE EDITOR
         else if (req.body.status === 'Revision' && oldProject.status !== 'Revision') {
@@ -300,14 +347,7 @@ router.patch('/:id', async (req, res) => {
                 const title = 'Revision Needed';
                 const body = `Admin requested revision for: ${projName}`;
 
-                if (global.sendPushNotification) {
-                    global.sendPushNotification(assignedTo, { title, body });
-                }
-
-                await alarmUser(assignedTo, title, body, {
-                    projectId: updatedProject._id.toString(),
-                    type: 'revision_needed',
-                });
+                await notifyProjectRecipient(assignedTo, title, body, updatedProject, 'revision_needed');
             }
         }
 

@@ -25,6 +25,8 @@ const projectSchema = new mongoose.Schema({
     completedAt: { type: Date },
     deadline: { type: Date },
     notes: { type: String },
+    createdBy: { type: String, default: '' },
+    createdByEmail: { type: String, default: '' },
     finalVideoLink: { type: String, default: '' },
     adminFeedback: { type: String, default: '' }
 }, { timestamps: true });

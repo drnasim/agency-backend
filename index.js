@@ -11,6 +11,7 @@ const { Server } = require('socket.io');
 const webpush = require('web-push');
 const cron = require('node-cron');
 const EmailAccount = require('./models/EmailAccount');
+const { resolveNotificationCandidates } = require('./utils/notificationRecipients');
 
 const app = express();
 const server = http.createServer(app); 
@@ -45,13 +46,23 @@ webpush.setVapidDetails('mailto:secure.nasim@gmail.com', publicVapidKey, private
 
 const subscriptionSchema = new mongoose.Schema({
     userName: String,
+    userEmail: String,
     subscription: Object
-});
+}, { timestamps: true });
 const PushSubscription = mongoose.model('PushSubscription', subscriptionSchema);
 
 global.sendPushNotification = async (userName, payload) => {
     try {
-        const subs = await PushSubscription.find({ userName });
+        const candidates = await resolveNotificationCandidates(userName);
+        if (candidates.length === 0) return;
+
+        const subs = await PushSubscription.find({
+            $or: [
+                { userName: { $in: candidates } },
+                { userEmail: { $in: candidates } }
+            ]
+        }).collation({ locale: 'en', strength: 2 });
+
         if (subs.length === 0) return; 
 
         const promises = subs.map(sub => {
@@ -104,13 +115,29 @@ app.get('/', (req, res) => {
 });
 
 // ================= Push Notification Routes =================
+app.get('/api/push/vapid-public-key', (req, res) => {
+    res.json({ publicKey: publicVapidKey });
+});
+
 app.post('/api/subscribe', async (req, res) => {
     try {
-        const { userName, subscription } = req.body;
-        const exists = await PushSubscription.findOne({ 'subscription.endpoint': subscription.endpoint });
-        if (!exists) {
-            await new PushSubscription({ userName, subscription }).save();
+        const { userName, userEmail, subscription } = req.body;
+        if (!subscription?.endpoint) {
+            return res.status(400).json({ error: 'A valid push subscription endpoint is required' });
         }
+
+        await PushSubscription.findOneAndUpdate(
+            { 'subscription.endpoint': subscription.endpoint },
+            {
+                $set: {
+                    userName: String(userName || '').trim(),
+                    userEmail: String(userEmail || '').trim().toLowerCase(),
+                    subscription
+                }
+            },
+            { new: true, upsert: true, setDefaultsOnInsert: true }
+        );
+
         res.status(201).json({ message: 'Subscribed to push notifications successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });

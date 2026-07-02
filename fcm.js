@@ -4,6 +4,7 @@
 // ============================================================
 const admin = require('firebase-admin');
 const User = require('./models/User');
+const { resolveNotificationUsers } = require('./utils/notificationRecipients');
 
 let initialized = false;
 
@@ -94,12 +95,13 @@ async function sendFcmAlarm(fcmToken, title, body, extra = {}) {
 async function alarmUser(nameOrEmail, title, body, extra = {}) {
   if (!nameOrEmail) return;
   try {
-    const user = await User.findOne({
-      $or: [{ name: nameOrEmail }, { email: nameOrEmail }],
-      fcmToken: { $ne: '' },
-    });
-    if (user?.fcmToken) {
+    const users = await resolveNotificationUsers(nameOrEmail, { fcmToken: { $ne: '' } });
+    const sentTokens = new Set();
+
+    for (const user of users) {
+      if (!user?.fcmToken || sentTokens.has(user.fcmToken)) continue;
       await sendFcmAlarm(user.fcmToken, title, body, extra);
+      sentTokens.add(user.fcmToken);
       console.log(`📱 FCM alarm → ${user.name || user.email}`);
     }
   } catch (err) {
