@@ -7,8 +7,24 @@ const { resolveNotificationRecipient } = require('../utils/notificationRecipient
 
 const REVIEW_STATUSES = new Set(['Submitted', 'Under Review']);
 
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+const parseRequiredDate = (value, label) => {
+    const date = new Date(value);
+    if (!value || Number.isNaN(date.getTime())) {
+        const err = new Error(`Invalid ${label}`);
+        err.statusCode = 400;
+        throw err;
+    }
+    return date;
+};
+
 const buildProjectUpdate = (body, oldProject) => {
     const update = { ...body };
+
+    if (hasOwn(update, 'createdAt')) {
+        update.createdAt = parseRequiredDate(update.createdAt, 'project creation date');
+    }
 
     if (update.status === 'Completed' && oldProject?.status !== 'Completed' && !update.completedAt) {
         update.completedAt = new Date();
@@ -23,6 +39,38 @@ const buildProjectUpdate = (body, oldProject) => {
     }
 
     return update;
+};
+
+const updateProjectById = async (projectId, update, oldProject) => {
+    if (!hasOwn(update, 'createdAt')) {
+        return Project.findByIdAndUpdate(
+            projectId,
+            { $set: update },
+            { new: true }
+        );
+    }
+
+    if (!oldProject) return null;
+
+    const { createdAt, ...schemaUpdate } = update;
+    if (Object.keys(schemaUpdate).length > 0) {
+        const schemaUpdatedProject = await Project.findByIdAndUpdate(
+            projectId,
+            { $set: schemaUpdate },
+            { new: true }
+        );
+
+        if (!schemaUpdatedProject) return null;
+    }
+
+    const rawUpdate = await Project.collection.updateOne(
+        { _id: oldProject._id },
+        { $set: { createdAt, updatedAt: new Date() } }
+    );
+
+    if (!rawUpdate.matchedCount) return null;
+
+    return Project.findById(projectId);
 };
 
 const getAssignedEditor = (project) => {
@@ -275,11 +323,7 @@ router.put('/:id', async (req, res) => {
         const oldProject = await Project.findById(req.params.id);
         const update = buildProjectUpdate(req.body, oldProject);
         
-        const updatedProject = await Project.findByIdAndUpdate(
-            req.params.id,
-            { $set: update },
-            { new: true }
-        );
+        const updatedProject = await updateProjectById(req.params.id, update, oldProject);
 
         if (!updatedProject) return res.status(404).json({ error: 'Project not found' });
 
@@ -299,7 +343,7 @@ router.put('/:id', async (req, res) => {
 
         res.status(200).json(updatedProject);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || 500).json({ error: err.message });
     }
 });
 
@@ -309,11 +353,7 @@ router.patch('/:id', async (req, res) => {
         const oldProject = await Project.findById(req.params.id);
         const update = buildProjectUpdate(req.body, oldProject);
 
-        const updatedProject = await Project.findByIdAndUpdate(
-            req.params.id,
-            { $set: update },
-            { new: true }
-        );
+        const updatedProject = await updateProjectById(req.params.id, update, oldProject);
 
         if (!updatedProject) return res.status(404).json({ error: 'Project not found' });
         if (!oldProject) return res.status(200).json(updatedProject);
@@ -353,7 +393,7 @@ router.patch('/:id', async (req, res) => {
 
         res.status(200).json(updatedProject);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || 500).json({ error: err.message });
     }
 });
 

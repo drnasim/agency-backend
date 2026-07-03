@@ -84,6 +84,8 @@ const allowedOrigins = [
   'https://fortivusgroupllc.com',
   'https://www.fortivusgroupllc.com',
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
   'http://localhost:3000'
 ];
 
@@ -165,6 +167,7 @@ const financeRoutes = require('./routes/finance');
 const cryptoRoutes = require('./routes/crypto');
 const uploadRoutes = require('./routes/upload'); // <--- Cloudflare R2 Upload Route
 const mailRoutes = require('./routes/mail');
+const liveTvRoutes = require('./routes/liveTv');
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -177,6 +180,7 @@ app.use('/api/finance', financeRoutes);
 app.use('/api/crypto', cryptoRoutes);
 app.use('/api/upload', uploadRoutes); // <--- Cloudflare R2 Upload Route connected
 app.use('/api/mail', mailRoutes);
+app.use('/api/live-tv', liveTvRoutes);
 
 const onlineUsers = new Map();
 
