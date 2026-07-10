@@ -3,6 +3,15 @@ const router = express.Router();
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
 const { sendFcmAlarm, sendFcmNotification } = require('../fcm');
+const { createAuthToken } = require('../middleware/authenticate');
+
+const buildLoginResponse = (user, primaryRole) => ({
+    name: user.name,
+    email: user.email,
+    role: Array.isArray(user.role) ? user.role : [user.role],
+    primaryRole,
+    token: createAuthToken(user)
+});
 
 // নতুন ইউজার/এডিটর রেজিস্টার করার API
 router.post('/register', async (req, res) => {
@@ -68,12 +77,7 @@ router.post('/login', async (req, res) => {
             });
             await user.save();
 
-            return res.status(200).json({ 
-                name: user.name, 
-                email: user.email, 
-                role: user.role,        // ✅ array রিটার্ন
-                primaryRole: 'Admin'    // ✅ প্রাইমারি রোল আলাদা
-            });
+            return res.status(200).json(buildLoginResponse(user, 'Admin'));
         }
 
         if (!user) return res.status(404).json({ error: "User not found in database!" });
@@ -90,12 +94,7 @@ router.post('/login', async (req, res) => {
         // ✅ primaryRole: Admin > Marketer > Editor priority
         const primaryRole = roleArray.includes('Admin') ? 'Admin' : roleArray.includes('Marketer') ? 'Marketer' : 'Editor';
 
-        res.status(200).json({ 
-            name: user.name, 
-            email: user.email, 
-            role: roleArray,        // ✅ array রিটার্ন (সব রোল)
-            primaryRole: primaryRole // ✅ প্রাইমারি রোল (নেভিগেশন কন্ট্রোলের জন্য)
-        });
+        res.status(200).json(buildLoginResponse(user, primaryRole));
     } catch (err) {
         console.error("Login Error:", err);
         res.status(500).json({ error: err.message });

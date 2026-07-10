@@ -8,10 +8,10 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
-const webpush = require('web-push');
 const cron = require('node-cron');
 const EmailAccount = require('./models/EmailAccount');
-const { resolveNotificationCandidates } = require('./utils/notificationRecipients');
+const { configureWebPush } = require('./config/push');
+const { getJwtSecret } = require('./middleware/authenticate');
 
 const app = express();
 const server = http.createServer(app); 
@@ -39,45 +39,9 @@ const getDailyLimitDateKey = (date = new Date(), timeZone = DAILY_LIMIT_TIMEZONE
     }
 };
 
-// ================= Web Push (VAPID) Setup =================
-const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U';
-const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '178fJbYV518x3fHmsG1yC_kQ1J6U2Y324Q_K-R8BfI0';
-webpush.setVapidDetails('mailto:secure.nasim@gmail.com', publicVapidKey, privateVapidKey);
-
-const subscriptionSchema = new mongoose.Schema({
-    userName: String,
-    userEmail: String,
-    subscription: Object
-}, { timestamps: true });
-const PushSubscription = mongoose.model('PushSubscription', subscriptionSchema);
-
-global.sendPushNotification = async (userName, payload) => {
-    try {
-        const candidates = await resolveNotificationCandidates(userName);
-        if (candidates.length === 0) return;
-
-        const subs = await PushSubscription.find({
-            $or: [
-                { userName: { $in: candidates } },
-                { userEmail: { $in: candidates } }
-            ]
-        }).collation({ locale: 'en', strength: 2 });
-
-        if (subs.length === 0) return; 
-
-        const promises = subs.map(sub => {
-            return webpush.sendNotification(sub.subscription, JSON.stringify(payload)).catch(err => {
-                console.error('Push error:', err);
-                if (err.statusCode === 410 || err.statusCode === 404) {
-                    PushSubscription.deleteOne({ _id: sub._id }).exec();
-                }
-            });
-        });
-        await Promise.all(promises);
-    } catch (err) {
-        console.log("Error sending push notification:", err);
-    }
-};
+// Fail fast with actionable errors instead of accepting unusable browser subscriptions.
+configureWebPush();
+getJwtSecret();
 
 const allowedOrigins = [
   'https://login.fortivusgroupllc.com',
@@ -86,8 +50,12 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://127.0.0.1:5174',
+  'http://localhost:5174',
   'http://localhost:3000'
-];
+].concat(String(process.env.FRONTEND_URL || '')
+  .split(',')
+  .map(origin => origin.trim().replace(/\/$/, ''))
+  .filter(Boolean));
 
 const io = new Server(server, {
     cors: {
@@ -116,46 +84,6 @@ app.get('/', (req, res) => {
     res.send('🚀 Fortivus Group Agency Server is running and healthy!');
 });
 
-// ================= Push Notification Routes =================
-app.get('/api/push/vapid-public-key', (req, res) => {
-    res.json({ publicKey: publicVapidKey });
-});
-
-app.post('/api/subscribe', async (req, res) => {
-    try {
-        const { userName, userEmail, subscription } = req.body;
-        if (!subscription?.endpoint) {
-            return res.status(400).json({ error: 'A valid push subscription endpoint is required' });
-        }
-
-        await PushSubscription.findOneAndUpdate(
-            { 'subscription.endpoint': subscription.endpoint },
-            {
-                $set: {
-                    userName: String(userName || '').trim(),
-                    userEmail: String(userEmail || '').trim().toLowerCase(),
-                    subscription
-                }
-            },
-            { new: true, upsert: true, setDefaultsOnInsert: true }
-        );
-
-        res.status(201).json({ message: 'Subscribed to push notifications successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/api/unsubscribe', async (req, res) => {
-    try {
-        const { endpoint } = req.body;
-        await PushSubscription.deleteOne({ 'subscription.endpoint': endpoint });
-        res.status(200).json({ message: 'Unsubscribed successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
 const projectRoutes = require('./routes/projects');
 const clientRoutes = require('./routes/clients');
 const employeeRoutes = require('./routes/employees');
@@ -168,6 +96,7 @@ const cryptoRoutes = require('./routes/crypto');
 const uploadRoutes = require('./routes/upload'); // <--- Cloudflare R2 Upload Route
 const mailRoutes = require('./routes/mail');
 const liveTvRoutes = require('./routes/liveTv');
+const pushRoutes = require('./routes/push');
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -181,6 +110,7 @@ app.use('/api/crypto', cryptoRoutes);
 app.use('/api/upload', uploadRoutes); // <--- Cloudflare R2 Upload Route connected
 app.use('/api/mail', mailRoutes);
 app.use('/api/live-tv', liveTvRoutes);
+app.use('/api/push', pushRoutes);
 
 const onlineUsers = new Map();
 
@@ -209,24 +139,8 @@ io.on('connection', (socket) => {
             socket.to(data.room).emit('receive_message', data);
         }
 
-        try {
-            // ✅ ফিক্সড: ChatRoom → Room (আগের ChatRoom model ভুল ছিল)
-            const Room = require('./models/Room');
-            const room = await Room.findById(data.room);
-            if (room) {
-                const receivers = room.members.filter(m => m !== data.sender);
-                receivers.forEach(receiverName => {
-                    const payload = {
-                        title: `New Message from ${data.sender}`,
-                        body: data.text || "Sent an attachment 📎",
-                        url: "/dashboard"
-                    };
-                    global.sendPushNotification(receiverName, payload);
-                });
-            }
-        } catch (error) {
-            console.log("Push notification send error:", error.message);
-        }
+        // Browser push is emitted only by the authoritative REST save path.
+        // Keeping it out of this relay prevents one saved message producing two pushes.
     });
 
     // ✅ মেসেজ ডেলিভার হওয়ার ইভেন্ট — ইউজার কানেক্ট হলে তার রুমের মেসেজ delivered মার্ক হবে
@@ -267,10 +181,23 @@ io.on('connection', (socket) => {
     });
 });
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://nasimsharkarofficial_db_user:AgencyNasim2026@fortivus-group-llc.3iqgbfe.mongodb.net/?retryWrites=true&w=majority";
+const MONGO_URI = String(process.env.MONGO_URI || '').trim();
+if (!MONGO_URI) throw new Error('MONGO_URI is required');
 
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB is Connected Successfully!'))
+    .then(async () => {
+        // Legacy records used a nested, unauthenticated subscription object and cannot
+        // be delivered after the mandatory VAPID rotation. Remove them without logging keys.
+        const PushSubscription = require('./models/PushSubscription');
+        const legacyCleanup = await PushSubscription.deleteMany({
+            $or: [{ endpoint: { $exists: false } }, { userId: { $exists: false } }]
+        });
+        await PushSubscription.syncIndexes();
+        console.log('✅ MongoDB is Connected Successfully!');
+        if (legacyCleanup.deletedCount) {
+            console.log(`Removed ${legacyCleanup.deletedCount} legacy browser push subscription(s)`);
+        }
+    })
     .catch((err) => {
         console.log('❌ DB Connection Error:', err.message);
     });

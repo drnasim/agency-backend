@@ -2,6 +2,35 @@ const express = require('express');
 const router = express.Router();
 const Message = require('../models/Message');
 const Room = require('../models/Room');
+const { authenticate } = require('../middleware/authenticate');
+const { sendPushToReferences } = require('../services/pushRecipients');
+
+const normalizeIdentity = (value) => String(value || '').trim().toLowerCase();
+
+const getSafeMessagePreview = (text, hasAttachment) => {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return hasAttachment ? 'Sent an attachment' : 'Sent a message';
+    return normalized.slice(0, 80) + (normalized.length > 80 ? '…' : '');
+};
+
+const buildMessagePush = ({ savedMessage, room, sender }) => {
+    const eventId = `message:${savedMessage._id}`;
+    const previewText = getSafeMessagePreview(savedMessage.text, Boolean(savedMessage.fileUrl));
+    return {
+        references: room.members || [],
+        eventId,
+        payload: {
+            type: 'message',
+            title: room.isGroup ? `New message in ${room.name}` : `New message from ${sender.name}`,
+            body: room.isGroup ? `${sender.name}: ${previewText}` : previewText,
+            url: `/dashboard?chat=${encodeURIComponent(room._id.toString())}`,
+            entityId: room._id.toString(),
+            eventId,
+            tag: eventId
+        },
+        excludeReferences: [sender._id, sender.name, sender.email]
+    };
+};
 
 // ================== ROOM (Group/Private Chat) API ==================
 
@@ -55,39 +84,39 @@ router.get('/:room', async (req, res) => {
 });
 
 // ডাটাবেসে নতুন মেসেজ সেভ করার API — ✅ status tracking সহ
-router.post('/', async (req, res) => {
+router.post('/', authenticate, async (req, res) => {
     try {
+        const roomData = await Room.findById(req.body.room);
+        if (!roomData) return res.status(404).json({ error: 'Conversation not found' });
+
+        const authenticatedIdentities = new Set([
+            normalizeIdentity(req.user.name),
+            normalizeIdentity(req.user.email)
+        ]);
+        const isMember = (roomData.members || [])
+            .some(member => authenticatedIdentities.has(normalizeIdentity(member)));
+        if (!isMember) return res.status(403).json({ error: 'You are not a member of this conversation' });
+
+        const sender = req.user.name;
         const newMessage = new Message({
             room: req.body.room,
-            sender: req.body.sender,
+            sender,
             text: req.body.text,
             fileUrl: req.body.fileUrl || '',
             time: req.body.time,
             status: 'sent',
             deliveredTo: [],
-            readBy: [req.body.sender] // নিজে তো নিজের মেসেজ দেখেছে
+            readBy: [sender] // নিজে তো নিজের মেসেজ দেখেছে
         });
 
         const savedMessage = await newMessage.save();
 
-        // ================= Push Notification Logic =================
-        if (global.sendPushNotification) {
-            const roomData = await Room.findById(req.body.room);
-            if (roomData && roomData.members) {
-                let previewText = req.body.text
-                    ? (req.body.text.length > 30 ? req.body.text.substring(0, 30) + '...' : req.body.text)
-                    : 'Sent a file/attachment 📎';
-
-                roomData.members.forEach(member => {
-                    if (member !== req.body.sender) {
-                        global.sendPushNotification(member, {
-                            title: roomData.isGroup ? `New message in ${roomData.name} 💬` : `New message from ${req.body.sender}`,
-                            body: roomData.isGroup ? `${req.body.sender}: ${previewText}` : previewText
-                        });
-                    }
-                });
-            }
-        }
+        // Push is intentionally non-blocking: delivery failures must never roll back a saved message.
+        const notification = buildMessagePush({ savedMessage, room: roomData, sender: req.user });
+        void sendPushToReferences(notification.references, notification.payload, {
+            eventId: notification.eventId,
+            excludeReferences: notification.excludeReferences
+        }).catch(error => console.error('Message browser push failed:', error.message));
 
         res.status(201).json(savedMessage);
     } catch (err) {
@@ -253,3 +282,5 @@ router.post('/last-messages', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getSafeMessagePreview = getSafeMessagePreview;
+module.exports.buildMessagePush = buildMessagePush;

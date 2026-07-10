@@ -4,6 +4,8 @@ const Project = require('../models/Project');
 const User = require('../models/User');
 const { alarmUser } = require('../fcm');
 const { resolveNotificationRecipient } = require('../utils/notificationRecipients');
+const { authenticate } = require('../middleware/authenticate');
+const { resolveUsersForReferences, sendPushToReferences } = require('../services/pushRecipients');
 
 const REVIEW_STATUSES = new Set(['Submitted', 'Under Review']);
 
@@ -86,6 +88,15 @@ const getProjectNotificationUrl = (project) => (
     project?._id ? `/project/${project._id.toString()}` : '/projects'
 );
 
+const buildProjectAssignmentCopy = (project) => {
+    const projectName = project.title || project.projectName || 'A new project';
+    const clientSuffix = project.client ? ` for ${project.client}` : '';
+    return {
+        title: 'New Project Assigned',
+        body: `${projectName}${clientSuffix} has been assigned to you.`
+    };
+};
+
 const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
     if (!recipient) return fallback;
     const resolved = await resolveNotificationRecipient(recipient);
@@ -94,17 +105,23 @@ const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
 
 const notifyProjectRecipients = async (recipients, title, body, project, type) => {
     const projectId = project?._id?.toString();
-    const payload = { title, body, url: getProjectNotificationUrl(project) };
+    const eventVersion = new Date(project?.updatedAt || project?.createdAt || Date.now()).getTime();
+    const eventId = `${type}:${projectId || 'unknown'}:${eventVersion}`;
+    const payload = {
+        type: 'project',
+        title,
+        body,
+        url: getProjectNotificationUrl(project),
+        entityId: projectId || '',
+        eventId,
+        tag: eventId
+    };
     const extra = { type };
     if (projectId) extra.projectId = projectId;
 
-    for (const recipient of uniqueIdentityList(recipients)) {
-        if (global.sendPushNotification) {
-            await global.sendPushNotification(recipient, payload);
-        }
-
-        await alarmUser(recipient, title, body, extra);
-    }
+    const uniqueRecipients = uniqueIdentityList(recipients);
+    await sendPushToReferences(uniqueRecipients, payload, { eventId });
+    await Promise.all(uniqueRecipients.map(recipient => alarmUser(recipient, title, body, extra)));
 };
 
 const notifyProjectRecipient = async (recipient, title, body, project, type) => {
@@ -291,9 +308,13 @@ router.get('/:id', async (req, res) => {
 });
 
 // নতুন প্রজেক্ট — editor-কে ring দাও
-router.post('/', async (req, res) => {
+router.post('/', authenticate, async (req, res) => {
     try {
-        const projectPayload = { ...req.body };
+        const projectPayload = {
+            ...req.body,
+            createdBy: req.user.name,
+            createdByEmail: req.user.email
+        };
         if (projectPayload.status === 'Completed' && !projectPayload.completedAt) {
             projectPayload.completedAt = new Date();
         }
@@ -302,13 +323,21 @@ router.post('/', async (req, res) => {
         const savedProject = await newProject.save();
 
         const assignedTo = getAssignedEditor(savedProject);
-        const createdBy = req.body.createdBy || '';
+        if (assignedTo) {
+            // Recipient lookup and delivery are detached so push/FCM failures cannot
+            // fail or delay an otherwise successful project creation.
+            void (async () => {
+                const [assignedUsers, creatorUsers] = await Promise.all([
+                    resolveUsersForReferences([assignedTo]),
+                    resolveUsersForReferences([req.user._id, req.user.name, req.user.email])
+                ]);
+                const creatorIds = new Set(creatorUsers.map(user => user._id.toString()));
+                const creatorIsAssignee = assignedUsers.some(user => creatorIds.has(user._id.toString()));
+                if (creatorIsAssignee) return;
 
-        if (assignedTo && !(createdBy && assignedTo === createdBy)) {
-            const title = 'New Project Assigned';
-            const body = `${savedProject.title || savedProject.projectName || 'A new project'} has been assigned to you.`;
-
-            await notifyProjectRecipient(assignedTo, title, body, savedProject, 'new_project');
+                const { title, body } = buildProjectAssignmentCopy(savedProject);
+                await notifyProjectRecipient(assignedTo, title, body, savedProject, 'new_project');
+            })().catch(error => console.error('Project assignment notification failed:', error.message));
         }
 
         res.status(201).json(savedProject);
@@ -407,3 +436,5 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildProjectAssignmentCopy = buildProjectAssignmentCopy;
+module.exports.getProjectNotificationUrl = getProjectNotificationUrl;
