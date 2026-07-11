@@ -62,4 +62,20 @@ const configureWebPush = (client = webpush, env = process.env) => {
     return config;
 };
 
-module.exports = { configureWebPush, readPushConfig };
+const initializeWebPush = (client = webpush, env = process.env) => {
+    try {
+        return {
+            available: true,
+            config: configureWebPush(client, env),
+            error: null
+        };
+    } catch (error) {
+        return {
+            available: false,
+            config: null,
+            error
+        };
+    }
+};
+
+module.exports = { configureWebPush, initializeWebPush, readPushConfig };

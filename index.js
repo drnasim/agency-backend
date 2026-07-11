@@ -10,8 +10,11 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cron = require('node-cron');
 const EmailAccount = require('./models/EmailAccount');
-const { configureWebPush } = require('./config/push');
-const { getJwtSecret } = require('./middleware/authenticate');
+const Room = require('./models/Room');
+const { initializeWebPush } = require('./config/push');
+const { attachAuthenticatedSocketUser, getJwtSecret } = require('./middleware/authenticate');
+const { getNotificationSocketRoom, isPublicChatSocketRoom } = require('./services/socketNotifications');
+const { resolveUsersForReferences } = require('./services/pushRecipients');
 
 const app = express();
 const server = http.createServer(app); 
@@ -39,8 +42,12 @@ const getDailyLimitDateKey = (date = new Date(), timeZone = DAILY_LIMIT_TIMEZONE
     }
 };
 
-// Fail fast with actionable errors instead of accepting unusable browser subscriptions.
-configureWebPush();
+// Browser Web Push is optional. Invalid or absent VAPID configuration disables only
+// that delivery channel; authenticated HTTP and Socket.IO realtime must still start.
+const webPushInitialization = initializeWebPush();
+if (!webPushInitialization.available) {
+    console.warn(`Browser Web Push is unavailable; realtime notifications remain enabled. ${webPushInitialization.error.message}`);
+}
 getJwtSecret();
 
 const allowedOrigins = [
@@ -115,10 +122,41 @@ app.use('/api/push', pushRoutes);
 const onlineUsers = new Map();
 
 // ================= Socket.io রিয়েল-টাইম ইভেন্ট =================
+io.use(attachAuthenticatedSocketUser);
+
 io.on('connection', (socket) => {
     console.log(`🔌 User connected: ${socket.id}`);
 
     let currentUserName = '';
+    const authorizedChatRooms = new Set();
+
+    const authorizeChatRoom = async (roomValue) => {
+        if (!socket.authenticatedUser?._id || !isPublicChatSocketRoom(roomValue)) return '';
+        const roomId = roomValue.trim();
+        if (authorizedChatRooms.has(roomId)) return roomId;
+
+        try {
+            const room = await Room.findById(roomId).select('members memberUserIds').lean();
+            if (!room) return '';
+            const immutableIds = Array.from(room.memberUserIds || []);
+            const legacyReferences = Array.from(room.members || []);
+            const references = immutableIds.length && immutableIds.length >= legacyReferences.length
+                ? immutableIds
+                : [...immutableIds, ...legacyReferences];
+            const members = await resolveUsersForReferences(references);
+            const authenticatedUserId = socket.authenticatedUser._id.toString();
+            if (!members.some(user => user._id.toString() === authenticatedUserId)) return '';
+            socket.join(roomId);
+            authorizedChatRooms.add(roomId);
+            return roomId;
+        } catch {
+            return '';
+        }
+    };
+
+    if (socket.authenticatedUser?._id) {
+        socket.join(getNotificationSocketRoom(socket.authenticatedUser._id));
+    }
 
     socket.on('user_connected', (userName) => {
         currentUserName = userName;
@@ -127,48 +165,49 @@ io.on('connection', (socket) => {
         console.log(`✅ User ${userName} is now online`);
     });
 
-    socket.on('join_room', (data) => {
-        if (data) {
-            socket.join(data);
-            console.log(`User ${currentUserName || socket.id} joined room: ${data}`);
-        }
+    socket.on('join_room', async (data, acknowledge) => {
+        const room = await authorizeChatRoom(data);
+        if (room) console.log(`User ${currentUserName || socket.id} joined room: ${room}`);
+        if (typeof acknowledge === 'function') acknowledge({ joined: Boolean(room) });
     });
 
-    socket.on('send_message', async (data) => {
-        if (data && data.room) {
-            socket.to(data.room).emit('receive_message', data);
-        }
-
-        // Browser push is emitted only by the authoritative REST save path.
-        // Keeping it out of this relay prevents one saved message producing two pushes.
+    socket.on('send_message', () => {
+        // Saved messages are emitted by the authenticated REST path. Retaining this
+        // no-op event keeps older clients connected without trusting relay payloads.
     });
 
     // ✅ মেসেজ ডেলিভার হওয়ার ইভেন্ট — ইউজার কানেক্ট হলে তার রুমের মেসেজ delivered মার্ক হবে
-    socket.on('mark_delivered', async ({ room, username }) => {
+    socket.on('mark_delivered', async ({ room } = {}) => {
+        const authorizedRoom = await authorizeChatRoom(room);
+        if (!authorizedRoom) return;
+        const username = socket.authenticatedUser.name;
         try {
             const Message = require('./models/Message');
             await Message.updateMany(
-                { room, sender: { $ne: username }, deliveredTo: { $nin: [username] } },
+                { room: authorizedRoom, sender: { $ne: username }, deliveredTo: { $nin: [username] } },
                 { $addToSet: { deliveredTo: username }, $set: { deliveredAt: new Date() } }
             );
             // status 'sent' → 'delivered' আপডেট
             await Message.updateMany(
-                { room, sender: { $ne: username }, status: 'sent' },
+                { room: authorizedRoom, sender: { $ne: username }, status: 'sent' },
                 { $set: { status: 'delivered' } }
             );
-            socket.to(room).emit('messages_delivered', { room, deliveredTo: username, deliveredAt: new Date().toISOString() });
+            socket.to(authorizedRoom).emit('messages_delivered', { room: authorizedRoom, deliveredTo: username, deliveredAt: new Date().toISOString() });
         } catch (e) { /* silent */ }
     });
 
     // ✅ মেসেজ read হওয়ার ইভেন্ট — ইউজার চ্যাট ওপেন করলে read মার্ক হবে
-    socket.on('mark_read', async ({ room, username }) => {
+    socket.on('mark_read', async ({ room } = {}) => {
+        const authorizedRoom = await authorizeChatRoom(room);
+        if (!authorizedRoom) return;
+        const username = socket.authenticatedUser.name;
         try {
             const Message = require('./models/Message');
             await Message.updateMany(
-                { room, sender: { $ne: username }, readBy: { $nin: [username] } },
+                { room: authorizedRoom, sender: { $ne: username }, readBy: { $nin: [username] } },
                 { $addToSet: { readBy: username }, $set: { status: 'read', readAt: new Date() } }
             );
-            socket.to(room).emit('messages_read', { room, readBy: username, readAt: new Date().toISOString() });
+            socket.to(authorizedRoom).emit('messages_read', { room: authorizedRoom, readBy: username, readAt: new Date().toISOString() });
         } catch (e) { /* silent */ }
     });
 

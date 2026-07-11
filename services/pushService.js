@@ -1,46 +1,15 @@
 const webpush = require('web-push');
 const PushSubscription = require('../models/PushSubscription');
+const {
+    cleanText,
+    normalizeNotificationPayload,
+    safeInternalUrl
+} = require('./notificationPayload');
 
 const EVENT_TTL_MS = 10 * 60 * 1000;
 const recentEvents = new Map();
 
-const cleanText = (value, maxLength) => String(value || '')
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxLength);
-
-const safeInternalUrl = (value, fallback = '/dashboard') => {
-    const raw = String(value || '').trim();
-    if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return fallback;
-    try {
-        const parsed = new URL(raw, 'https://push.invalid');
-        if (parsed.origin !== 'https://push.invalid') return fallback;
-        return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-    } catch {
-        return fallback;
-    }
-};
-
-const normalizePayload = (payload = {}) => {
-    const allowedTypes = new Set(['message', 'project', 'call', 'test']);
-    const type = allowedTypes.has(payload.type) ? payload.type : 'test';
-    const entityId = cleanText(payload.entityId, 100);
-    const eventId = cleanText(payload.eventId, 160);
-    const fallbackTag = eventId || `${type}:${entityId || Date.now()}`;
-
-    return {
-        type,
-        title: cleanText(payload.title || 'Fortivus Group', 100),
-        body: cleanText(payload.body || 'You have a new notification.', 180),
-        url: safeInternalUrl(payload.url),
-        entityId,
-        eventId,
-        tag: cleanText(payload.tag || fallbackTag, 160),
-        icon: safeInternalUrl(payload.icon || '/favicon-192.png', '/favicon-192.png'),
-        badge: safeInternalUrl(payload.badge || '/favicon-32.png', '/favicon-32.png')
-    };
-};
+const normalizePayload = normalizeNotificationPayload;
 
 const eventWasRecentlySent = (key, now = Date.now()) => {
     for (const [cachedKey, expiresAt] of recentEvents) {
@@ -86,15 +55,21 @@ const createPushService = ({
     };
 
     const sendToUser = async (userId, payload, { eventId } = {}) => {
-        const normalizedPayload = normalizePayload({ ...payload, eventId: eventId || payload.eventId });
+        const immutableUserId = cleanText(userId, 100);
+        const normalizedPayload = normalizePayload({
+            ...payload,
+            eventId: eventId || payload.eventId,
+            // Each browser-push payload is bound to the backend-selected user.
+            recipientUserId: immutableUserId
+        });
         const dedupeId = cleanText(eventId || normalizedPayload.eventId, 160);
-        const dedupeKey = dedupeId ? `${userId}:${dedupeId}` : '';
+        const dedupeKey = dedupeId ? `${immutableUserId}:${dedupeId}` : '';
         if (dedupeKey && eventWasRecentlySent(dedupeKey)) {
             return { delivered: 0, expired: 0, failed: 0, duplicate: true };
         }
 
         try {
-            const records = await SubscriptionModel.find({ userId, enabled: true });
+            const records = await SubscriptionModel.find({ userId: immutableUserId, enabled: true });
             const results = await Promise.all(records.map(record => sendRecord(record, normalizedPayload)));
             return results.reduce((total, result) => ({
                 delivered: total.delivered + result.delivered,
@@ -109,12 +84,18 @@ const createPushService = ({
     };
 
     const sendToUsers = async (userIds, payload, options = {}) => {
-        const uniqueUserIds = [...new Set((userIds || []).map(String).filter(Boolean))];
+        const uniqueUserIds = [...new Set((userIds || [])
+            .map(userId => String(userId || '').trim())
+            .filter(Boolean))];
         return Promise.all(uniqueUserIds.map(userId => sendToUser(userId, payload, options)));
     };
 
     const sendToSubscription = async (record, payload, options = {}) => {
-        const normalizedPayload = normalizePayload({ ...payload, eventId: options.eventId || payload.eventId });
+        const normalizedPayload = normalizePayload({
+            ...payload,
+            eventId: options.eventId || payload.eventId,
+            recipientUserId: cleanText(record?.userId, 100)
+        });
         return sendRecord(record, normalizedPayload);
     };
 

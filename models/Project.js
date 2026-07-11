@@ -25,6 +25,7 @@ const projectSchema = new mongoose.Schema({
     completedAt: { type: Date },
     deadline: { type: Date },
     notes: { type: String },
+    createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdBy: { type: String, default: '' },
     createdByEmail: { type: String, default: '' },
     finalVideoLink: { type: String, default: '' },

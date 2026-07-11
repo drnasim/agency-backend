@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const webpush = require('web-push');
 const User = require('../models/User');
 const PushSubscription = require('../models/PushSubscription');
 const { pushService } = require('../services/pushService');
@@ -138,4 +139,40 @@ test('authenticated push routes bind, inspect, test, and remove only the current
     });
     assert.equal(unsubscribe.status, 200);
     assert.equal(String(calls.remove[0].userId), userId.toString());
+});
+
+test('VAPID public-key endpoint returns a controlled JSON 503 when Web Push is unavailable', async t => {
+    const variableNames = ['VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT'];
+    const previousValues = new Map(variableNames.map(name => [name, process.env[name]]));
+    variableNames.forEach(name => { delete process.env[name]; });
+    t.after(() => {
+        previousValues.forEach((value, name) => {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+        });
+    });
+
+    delete require.cache[require.resolve('../routes/push')];
+    const pushRouter = require('../routes/push');
+    const app = express();
+    app.use('/api/push', pushRouter);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise(resolve => server.once('listening', resolve));
+    t.after(() => server.close());
+
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/push/vapid-public-key`);
+    assert.equal(response.status, 503);
+    assert.match(response.headers.get('content-type'), /^application\/json/);
+    assert.deepEqual(await response.json(), {
+        error: 'Browser Web Push is unavailable',
+        code: 'WEB_PUSH_UNAVAILABLE'
+    });
+
+    const pair = webpush.generateVAPIDKeys();
+    process.env.VAPID_PUBLIC_KEY = pair.publicKey;
+    process.env.VAPID_PRIVATE_KEY = pair.privateKey;
+    process.env.VAPID_SUBJECT = 'mailto:test@example.com';
+    const configuredResponse = await fetch(`http://127.0.0.1:${server.address().port}/api/push/vapid-public-key`);
+    assert.equal(configuredResponse.status, 200);
+    assert.deepEqual(await configuredResponse.json(), { publicKey: pair.publicKey });
 });

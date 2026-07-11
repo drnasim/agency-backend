@@ -3,7 +3,7 @@ const User = require('../models/User');
 
 const getJwtSecret = () => {
     const secret = String(process.env.JWT_SECRET || '').trim();
-    if (!secret) throw new Error('JWT_SECRET is required for authenticated push notification APIs');
+    if (!secret) throw new Error('JWT_SECRET is required for authenticated APIs');
     return secret;
 };
 
@@ -13,15 +13,19 @@ const createAuthToken = (user) => jwt.sign(
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
 );
 
+const findUserForToken = async (token) => {
+    const payload = jwt.verify(token, getJwtSecret());
+    return User.findOne({ _id: payload.sub, isActive: { $ne: false } })
+        .select('_id name email role isActive');
+};
+
 const authenticate = async (req, res, next) => {
     try {
         const authorization = String(req.get('authorization') || '');
         const match = authorization.match(/^Bearer\s+(.+)$/i);
         if (!match) return res.status(401).json({ error: 'Authentication required' });
 
-        const payload = jwt.verify(match[1], getJwtSecret());
-        const user = await User.findOne({ _id: payload.sub, isActive: { $ne: false } })
-            .select('_id name email role isActive');
+        const user = await findUserForToken(match[1]);
 
         if (!user) return res.status(401).json({ error: 'Session is no longer valid' });
         req.user = user;
@@ -30,9 +34,24 @@ const authenticate = async (req, res, next) => {
         if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
             return res.status(401).json({ error: 'Session is invalid or expired' });
         }
-        console.error('Push authentication error:', error.message);
+        console.error('Authentication error:', error.message);
         return res.status(500).json({ error: 'Authentication is unavailable' });
     }
 };
 
-module.exports = { authenticate, createAuthToken, getJwtSecret };
+// Existing chat sockets remain backwards compatible. Only sockets presenting a
+// valid session are attached to the private, server-derived notification room.
+const attachAuthenticatedSocketUser = async (socket, next) => {
+    const token = String(socket.handshake?.auth?.token || '').trim();
+    if (!token) return next();
+
+    try {
+        const user = await findUserForToken(token);
+        if (user) socket.authenticatedUser = user;
+    } catch {
+        // An invalid optional socket token must not interrupt legacy chat events.
+    }
+    return next();
+};
+
+module.exports = { authenticate, attachAuthenticatedSocketUser, createAuthToken, findUserForToken, getJwtSecret };

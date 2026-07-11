@@ -46,7 +46,14 @@ const endpointFingerprint = (endpoint) => crypto
 
 router.get('/vapid-public-key', (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json({ publicKey: readPushConfig().publicKey });
+    try {
+        return res.json({ publicKey: readPushConfig().publicKey });
+    } catch {
+        return res.status(503).json({
+            error: 'Browser Web Push is unavailable',
+            code: 'WEB_PUSH_UNAVAILABLE'
+        });
+    }
 });
 
 router.use(authenticate);

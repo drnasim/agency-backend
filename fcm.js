@@ -4,9 +4,22 @@
 // ============================================================
 const admin = require('firebase-admin');
 const User = require('./models/User');
-const { resolveNotificationUsers } = require('./utils/notificationRecipients');
+const { resolveUsersForReferences } = require('./services/pushRecipients');
 
 let initialized = false;
+const FCM_EVENT_TTL_MS = 10 * 60 * 1000;
+const recentFcmEvents = new Map();
+
+const claimFcmEvent = (token, eventId, now = Date.now()) => {
+  for (const [key, expiresAt] of recentFcmEvents) {
+    if (expiresAt <= now) recentFcmEvents.delete(key);
+  }
+  if (!token || !eventId) return true;
+  const key = `${token}:${eventId}`;
+  if (recentFcmEvents.has(key)) return false;
+  recentFcmEvents.set(key, now + FCM_EVENT_TTL_MS);
+  return true;
+};
 
 function init() {
   if (initialized) return admin;
@@ -91,22 +104,29 @@ async function sendFcmAlarm(fcmToken, title, body, extra = {}) {
   }
 }
 
-// Resolve a user reference (name OR email) → send alarm.
-async function alarmUser(nameOrEmail, title, body, extra = {}) {
-  if (!nameOrEmail) return;
+// Resolve authoritative stored references, collapse them to immutable users/tokens,
+// and send one alarm per device even when a person has multiple roles/identities.
+async function alarmUsers(references, title, body, extra = {}) {
+  const uniqueReferences = [...new Set((references || []).map(value => String(value || '').trim()).filter(Boolean))];
+  if (!uniqueReferences.length) return;
   try {
-    const users = await resolveNotificationUsers(nameOrEmail, { fcmToken: { $ne: '' } });
+    const users = await resolveUsersForReferences(uniqueReferences);
     const sentTokens = new Set();
 
     for (const user of users) {
       if (!user?.fcmToken || sentTokens.has(user.fcmToken)) continue;
+      if (!claimFcmEvent(user.fcmToken, extra.eventId)) continue;
       await sendFcmAlarm(user.fcmToken, title, body, extra);
       sentTokens.add(user.fcmToken);
       console.log(`📱 FCM alarm → ${user.name || user.email}`);
     }
   } catch (err) {
-    console.error('alarmUser lookup error:', err.message);
+    console.error('alarmUsers lookup error:', err.message);
   }
+}
+
+async function alarmUser(nameOrEmail, title, body, extra = {}) {
+  return alarmUsers([nameOrEmail], title, body, extra);
 }
 
 // DEBUG: Send a notification-style message (Android system shows it directly,
@@ -132,4 +152,4 @@ async function sendFcmNotification(fcmToken, title, body) {
   }
 }
 
-module.exports = { sendFcmAlarm, alarmUser, sendFcmNotification };
+module.exports = { claimFcmEvent, sendFcmAlarm, alarmUser, alarmUsers, sendFcmNotification };

@@ -14,9 +14,11 @@ test('push service sends to every device and removes only expired subscriptions'
         deleteOne: async query => { removed.push(query._id); }
     };
     const attempted = [];
+    const payloads = [];
     const webpushClient = {
-        sendNotification: async subscription => {
+        sendNotification: async (subscription, serializedPayload) => {
             attempted.push(subscription.endpoint);
+            payloads.push(JSON.parse(serializedPayload));
             if (subscription.endpoint.endsWith('/two')) throw Object.assign(new Error('gone'), { statusCode: 410 });
             if (subscription.endpoint.endsWith('/three')) throw Object.assign(new Error('temporary'), { statusCode: 503 });
         }
@@ -29,10 +31,17 @@ test('push service sends to every device and removes only expired subscriptions'
     });
 
     const result = await service.sendToUser('user-1', {
-        type: 'message', title: 'Hello', body: 'Preview', url: '/dashboard?chat=room'
+        type: 'message',
+        title: 'Hello',
+        body: 'Preview',
+        url: '/dashboard?chat=room',
+        recipientUserId: 'frontend-spoofed-user',
+        senderUserId: 'authenticated-sender-id'
     }, { eventId: 'message:service-test-1' });
 
     assert.deepEqual(attempted.sort(), records.map(record => record.endpoint).sort());
+    assert.ok(payloads.every(payload => payload.recipientUserId === 'user-1'));
+    assert.ok(payloads.every(payload => payload.senderUserId === 'authenticated-sender-id'));
     assert.deepEqual(removed, ['two']);
     assert.deepEqual(result, { delivered: 1, expired: 1, failed: 1, duplicate: false });
     assert.equal(logs.length, 1);
@@ -51,6 +60,35 @@ test('push service suppresses a repeated event for the same recipient', async ()
     assert.equal(first.delivered, 1);
     assert.equal(second.duplicate, true);
     assert.equal(calls, 1);
+});
+
+test('each Web Push payload is stamped with its backend-selected immutable recipient ID', async () => {
+    const payloads = [];
+    const service = createPushService({
+        SubscriptionModel: {
+            find: async ({ userId }) => [{
+                _id: `subscription-${userId}`,
+                endpoint: `https://push.example/${userId}`,
+                keys: {}
+            }],
+            deleteOne: async () => {}
+        },
+        webpushClient: {
+            sendNotification: async (subscription, serializedPayload) => {
+                payloads.push({ endpoint: subscription.endpoint, payload: JSON.parse(serializedPayload) });
+            }
+        },
+        logger: { error: assert.fail }
+    });
+
+    await service.sendToUsers(['recipient-a', 'recipient-b'], {
+        type: 'project',
+        title: 'Assigned',
+        recipientUserId: 'frontend-spoofed-user'
+    }, { eventId: 'project:per-recipient-payload-test' });
+
+    assert.deepEqual(payloads.map(item => item.payload.recipientUserId).sort(), ['recipient-a', 'recipient-b']);
+    assert.ok(payloads.every(item => item.endpoint.endsWith(item.payload.recipientUserId)));
 });
 
 test('payload normalization strips control text and rejects external URLs', () => {

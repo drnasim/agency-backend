@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const Project = require('../models/Project');
-const User = require('../models/User');
-const { alarmUser } = require('../fcm');
+const { alarmUsers } = require('../fcm');
 const { resolveNotificationRecipient } = require('../utils/notificationRecipients');
 const { authenticate } = require('../middleware/authenticate');
-const { resolveUsersForReferences, sendPushToReferences } = require('../services/pushRecipients');
+const { deliverNotificationToReferences } = require('../services/notificationDelivery');
+const { resolveUsersForReferences } = require('../services/pushRecipients');
 
 const REVIEW_STATUSES = new Set(['Submitted', 'Under Review']);
 
@@ -23,6 +23,14 @@ const parseRequiredDate = (value, label) => {
 
 const buildProjectUpdate = (body, oldProject) => {
     const update = { ...body };
+
+    // Creator identity is assigned from the authenticated session at creation and
+    // cannot be redirected by a later assignment/submission request.
+    delete update.createdByUserId;
+    delete update.createdBy;
+    delete update.createdByEmail;
+    delete update._id;
+    delete update.__v;
 
     if (hasOwn(update, 'createdAt')) {
         update.createdAt = parseRequiredDate(update.createdAt, 'project creation date');
@@ -97,6 +105,10 @@ const buildProjectAssignmentCopy = (project) => {
     };
 };
 
+const getProjectNotificationEventId = (project, type) => (
+    `${type}:${project?._id?.toString() || 'unknown'}`
+);
+
 const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
     if (!recipient) return fallback;
     const resolved = await resolveNotificationRecipient(recipient);
@@ -105,8 +117,7 @@ const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
 
 const notifyProjectRecipients = async (recipients, title, body, project, type) => {
     const projectId = project?._id?.toString();
-    const eventVersion = new Date(project?.updatedAt || project?.createdAt || Date.now()).getTime();
-    const eventId = `${type}:${projectId || 'unknown'}:${eventVersion}`;
+    const eventId = getProjectNotificationEventId(project, type);
     const payload = {
         type: 'project',
         title,
@@ -116,31 +127,58 @@ const notifyProjectRecipients = async (recipients, title, body, project, type) =
         eventId,
         tag: eventId
     };
-    const extra = { type };
+    const extra = { type, eventId };
     if (projectId) extra.projectId = projectId;
 
     const uniqueRecipients = uniqueIdentityList(recipients);
-    await sendPushToReferences(uniqueRecipients, payload, { eventId });
-    await Promise.all(uniqueRecipients.map(recipient => alarmUser(recipient, title, body, extra)));
+    await deliverNotificationToReferences(uniqueRecipients, payload, { eventId });
+    await alarmUsers(uniqueRecipients, title, body, extra);
 };
 
 const notifyProjectRecipient = async (recipient, title, body, project, type) => {
     await notifyProjectRecipients([recipient], title, body, project, type);
 };
 
-const getAdminNotificationRecipients = async () => {
-    const admins = await User.find({
-        role: 'Admin',
-        isActive: { $ne: false }
-    }).select('name email').lean();
+const getSubmissionNotificationRecipients = (project) => (
+    uniqueIdentityList([project.createdByUserId, project.createdByEmail, project.createdBy])
+);
 
-    return uniqueIdentityList(admins.flatMap(admin => [admin.email, admin.name]));
+const hasUserRole = (user, role) => {
+    const roles = Array.isArray(user?.role) ? user.role : [user?.role];
+    return roles.includes(role);
 };
 
-const getSubmissionNotificationRecipients = async (project) => {
-    const creatorRecipients = uniqueIdentityList([project.createdByEmail, project.createdBy]);
-    if (creatorRecipients.length > 0) return creatorRecipients;
-    return getAdminNotificationRecipients();
+const isAssignedProjectUser = async (project, user) => {
+    const assignedTo = getAssignedEditor(project);
+    if (!assignedTo || !user?._id) return false;
+    const users = await resolveUsersForReferences([assignedTo]);
+    return users.some(recipient => recipient._id.toString() === user._id.toString());
+};
+
+const assertProjectMutationAllowed = async (user, project, update, { adminOnly = false } = {}) => {
+    if (hasUserRole(user, 'Admin')) return;
+    if (adminOnly || !hasUserRole(user, 'Editor') || !await isAssignedProjectUser(project, user)) {
+        const error = new Error('You do not have permission to update this project');
+        error.statusCode = 403;
+        throw error;
+    }
+
+    const allowedEditorFields = new Set(['status', 'finalVideoLink', 'resources', 'adminFeedback']);
+    if (Object.keys(update).some(field => !allowedEditorFields.has(field))) {
+        const error = new Error('Only project submission fields can be updated by the assigned editor');
+        error.statusCode = 403;
+        throw error;
+    }
+    if (update.status && !['In Progress', 'Submitted', 'Under Review'].includes(update.status)) {
+        const error = new Error('This project status can only be changed by an Admin');
+        error.statusCode = 403;
+        throw error;
+    }
+    if (update.adminFeedback) {
+        const error = new Error('Admin feedback can only be changed by an Admin');
+        error.statusCode = 403;
+        throw error;
+    }
 };
 
 const getCompletedProjectDate = (project) => {
@@ -312,6 +350,7 @@ router.post('/', authenticate, async (req, res) => {
     try {
         const projectPayload = {
             ...req.body,
+            createdByUserId: req.user._id,
             createdBy: req.user.name,
             createdByEmail: req.user.email
         };
@@ -324,17 +363,10 @@ router.post('/', authenticate, async (req, res) => {
 
         const assignedTo = getAssignedEditor(savedProject);
         if (assignedTo) {
-            // Recipient lookup and delivery are detached so push/FCM failures cannot
-            // fail or delay an otherwise successful project creation.
+            // Delivery is detached so push/FCM failures cannot fail or delay an
+            // otherwise successful project creation. Assignment remains authoritative,
+            // including when the creator is also the assigned recipient.
             void (async () => {
-                const [assignedUsers, creatorUsers] = await Promise.all([
-                    resolveUsersForReferences([assignedTo]),
-                    resolveUsersForReferences([req.user._id, req.user.name, req.user.email])
-                ]);
-                const creatorIds = new Set(creatorUsers.map(user => user._id.toString()));
-                const creatorIsAssignee = assignedUsers.some(user => creatorIds.has(user._id.toString()));
-                if (creatorIsAssignee) return;
-
                 const { title, body } = buildProjectAssignmentCopy(savedProject);
                 await notifyProjectRecipient(assignedTo, title, body, savedProject, 'new_project');
             })().catch(error => console.error('Project assignment notification failed:', error.message));
@@ -347,10 +379,12 @@ router.post('/', authenticate, async (req, res) => {
 });
 
 // প্রজেক্ট আপডেট (PUT) — Frontend থেকে Quick Editor চেঞ্জ বা ফুল আপডেটের জন্য
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticate, async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);
         const update = buildProjectUpdate(req.body, oldProject);
+        if (!oldProject) return res.status(404).json({ error: 'Project not found' });
+        await assertProjectMutationAllowed(req.user, oldProject, update, { adminOnly: true });
         
         const updatedProject = await updateProjectById(req.params.id, update, oldProject);
 
@@ -366,7 +400,8 @@ router.put('/:id', async (req, res) => {
                 const title = 'Project Re-assigned';
                 const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
 
-                await notifyProjectRecipient(newEditor, title, body, updatedProject, 'new_project');
+                void notifyProjectRecipient(newEditor, title, body, updatedProject, 'new_project')
+                    .catch(error => console.error('Project reassignment notification failed:', error.message));
             }
         }
 
@@ -377,10 +412,12 @@ router.put('/:id', async (req, res) => {
 });
 
 // প্রজেক্ট আপডেট (PATCH) — revision হলে editor-কে ring দাও
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', authenticate, async (req, res) => {
     try {
         const oldProject = await Project.findById(req.params.id);
         const update = buildProjectUpdate(req.body, oldProject);
+        if (!oldProject) return res.status(404).json({ error: 'Project not found' });
+        await assertProjectMutationAllowed(req.user, oldProject, update);
 
         const updatedProject = await updateProjectById(req.params.id, update, oldProject);
 
@@ -395,20 +432,25 @@ router.patch('/:id', async (req, res) => {
             const title = 'Project Re-assigned';
             const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
 
-            await notifyProjectRecipient(assignedTo, title, body, updatedProject, 'new_project');
+            void notifyProjectRecipient(assignedTo, title, body, updatedProject, 'new_project')
+                .catch(error => console.error('Project reassignment notification failed:', error.message));
         }
 
-        // 1. Editor submitted → notify the project creator, or admins for legacy projects.
+        // 1. Editor submitted → notify only the recorded project creator.
         if (REVIEW_STATUSES.has(req.body.status) && !REVIEW_STATUSES.has(oldProject.status)) {
             const recipients = await getSubmissionNotificationRecipients(updatedProject);
-            const editorName = await getRecipientDisplayName(assignedTo);
-            await notifyProjectRecipients(
-                recipients,
-                'Project Submitted',
-                `${editorName} submitted: ${projName}`,
-                updatedProject,
-                'project_submitted'
-            );
+            if (recipients.length) {
+                void (async () => {
+                    const editorName = await getRecipientDisplayName(assignedTo);
+                    await notifyProjectRecipients(
+                        recipients,
+                        'Project Submitted',
+                        `${editorName} submitted: ${projName}`,
+                        updatedProject,
+                        'project_submitted'
+                    );
+                })().catch(error => console.error('Project submission notification failed:', error.message));
+            }
         }
         // 2. Admin requested revision → RING THE EDITOR
         else if (req.body.status === 'Revision' && oldProject.status !== 'Revision') {
@@ -416,7 +458,8 @@ router.patch('/:id', async (req, res) => {
                 const title = 'Revision Needed';
                 const body = `Admin requested revision for: ${projName}`;
 
-                await notifyProjectRecipient(assignedTo, title, body, updatedProject, 'revision_needed');
+                void notifyProjectRecipient(assignedTo, title, body, updatedProject, 'revision_needed')
+                    .catch(error => console.error('Project revision notification failed:', error.message));
             }
         }
 
@@ -426,8 +469,11 @@ router.patch('/:id', async (req, res) => {
     }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticate, async (req, res) => {
     try {
+        const project = await Project.findById(req.params.id);
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+        await assertProjectMutationAllowed(req.user, project, {}, { adminOnly: true });
         await Project.findByIdAndDelete(req.params.id);
         res.status(200).json({ message: 'Project deleted successfully' });
     } catch (err) {
@@ -437,4 +483,7 @@ router.delete('/:id', async (req, res) => {
 
 module.exports = router;
 module.exports.buildProjectAssignmentCopy = buildProjectAssignmentCopy;
+module.exports.buildProjectUpdate = buildProjectUpdate;
+module.exports.getProjectNotificationEventId = getProjectNotificationEventId;
+module.exports.getSubmissionNotificationRecipients = getSubmissionNotificationRecipients;
 module.exports.getProjectNotificationUrl = getProjectNotificationUrl;

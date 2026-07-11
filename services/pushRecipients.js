@@ -1,7 +1,6 @@
 const mongoose = require('mongoose');
 const Employee = require('../models/Employee');
 const User = require('../models/User');
-const { pushService } = require('./pushService');
 
 const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const activeUserFilter = { isActive: { $ne: false } };
@@ -28,13 +27,13 @@ const resolveSingleUserReference = async (reference) => {
     const employees = await Employee.find({ name: exactName }).limit(2).lean();
     if (employees.length === 1) return findUserByEmail(employees[0].email);
     if (employees.length > 1) {
-        console.warn('Skipped an ambiguous browser push employee reference');
+        console.warn('Skipped an ambiguous notification employee reference');
         return null;
     }
 
     const users = await User.find({ ...activeUserFilter, name: exactName }).limit(2).lean();
     if (users.length === 1) return users[0];
-    if (users.length > 1) console.warn('Skipped an ambiguous browser push user reference');
+    if (users.length > 1) console.warn('Skipped an ambiguous notification user reference');
     return null;
 };
 
@@ -54,23 +53,17 @@ const selectRecipientIds = (recipients = [], excluded = []) => {
         .filter(userId => !excludedIds.has(userId)))];
 };
 
-const sendPushToReferences = async (references, payload, { eventId, excludeReferences = [] } = {}) => {
-    try {
-        const [recipients, excluded] = await Promise.all([
-            resolveUsersForReferences(references),
-            resolveUsersForReferences(excludeReferences)
-        ]);
-        const recipientIds = selectRecipientIds(recipients, excluded);
-        return pushService.sendToUsers(recipientIds, payload, { eventId });
-    } catch (error) {
-        console.error('Browser push recipient resolution failed:', error.message);
-        return [];
-    }
+const resolveRecipientIdsForReferences = async (references = [], excludeReferences = []) => {
+    const [recipients, excluded] = await Promise.all([
+        resolveUsersForReferences(references),
+        resolveUsersForReferences(excludeReferences)
+    ]);
+    return selectRecipientIds(recipients, excluded);
 };
 
 module.exports = {
+    resolveRecipientIdsForReferences,
     resolveSingleUserReference,
     resolveUsersForReferences,
-    selectRecipientIds,
-    sendPushToReferences
+    selectRecipientIds
 };
