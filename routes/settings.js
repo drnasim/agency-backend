@@ -1,6 +1,71 @@
 const express = require('express');
 const router = express.Router();
 const Settings = require('../models/Settings'); // Railway-এর এরর এড়াতে ছোট হাতের 's' করা হলো
+const { authenticate } = require('../middleware/authenticate');
+
+const DEFAULT_LIVE_TV_CONFIG = Object.freeze({
+    position: 'top-right',
+    servers: [
+        { id: 'server-1', label: 'Server 1', url: 'http://172.19.17.28/#' },
+        { id: 'server-2', label: 'Server 2', url: 'http://www.tv.iptv24bd.live/#' }
+    ]
+});
+const LIVE_TV_POSITIONS = new Set(['top-left', 'top-right', 'bottom-left', 'bottom-right']);
+
+const normalizeLiveTvConfig = (value) => {
+    if (!value || !Array.isArray(value.servers)) return null;
+    if (!LIVE_TV_POSITIONS.has(value.position) || value.servers.length < 1 || value.servers.length > 20) return null;
+
+    const ids = new Set();
+    const servers = [];
+    for (const server of value.servers) {
+        const id = String(server?.id || '').trim();
+        const label = String(server?.label || '').trim();
+        const url = String(server?.url || '').trim();
+        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || ids.has(id) || !label || label.length > 60 || url.length > 2048) return null;
+        try {
+            const parsedUrl = new URL(url);
+            if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return null;
+        } catch {
+            return null;
+        }
+        ids.add(id);
+        servers.push({ id, label, url });
+    }
+    return { position: value.position, servers };
+};
+
+const requireAdmin = (req, res, next) => {
+    const roles = Array.isArray(req.user?.role) ? req.user.role : [req.user?.role];
+    if (!roles.includes('Admin')) return res.status(403).json({ error: 'Admin access is required' });
+    return next();
+};
+
+router.get('/live-tv', authenticate, async (req, res) => {
+    try {
+        const settings = await Settings.findOne({ type: 'liveTvConfig' }).lean();
+        const savedConfig = normalizeLiveTvConfig(settings?.payments?.[0]);
+        return res.json(savedConfig || DEFAULT_LIVE_TV_CONFIG);
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.put('/live-tv', authenticate, requireAdmin, async (req, res) => {
+    const config = normalizeLiveTvConfig(req.body);
+    if (!config) return res.status(400).json({ error: 'A valid Live TV server configuration is required' });
+
+    try {
+        await Settings.findOneAndUpdate(
+            { type: 'liveTvConfig' },
+            { $set: { payments: [config] } },
+            { upsert: true, runValidators: true, setDefaultsOnInsert: true }
+        );
+        return res.json(config);
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
 
 // ডাটাবেস থেকে পেমেন্ট মেথডগুলো দেখার API
 router.get('/payments', async (req, res) => {
@@ -130,3 +195,4 @@ router.put('/drive', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.normalizeLiveTvConfig = normalizeLiveTvConfig;
