@@ -4,19 +4,15 @@ const Settings = require('../models/Settings'); // Railway-এর এরর এ�
 const { authenticate } = require('../middleware/authenticate');
 
 const DEFAULT_LIVE_TV_CONFIG = Object.freeze({
-    position: 'top-right',
-    showServerList: true,
     servers: [
         { id: 'server-1', label: 'Server 1', url: 'http://172.19.17.28/#' },
         { id: 'server-2', label: 'Server 2', url: 'http://www.tv.iptv24bd.live/#' }
     ]
 });
-const LIVE_TV_POSITIONS = new Set(['top-left', 'top-right', 'bottom-left', 'bottom-right']);
 
 const normalizeLiveTvConfig = (value) => {
     if (!value || !Array.isArray(value.servers)) return null;
-    if (!LIVE_TV_POSITIONS.has(value.position) || value.servers.length < 1 || value.servers.length > 20) return null;
-    if (value.showServerList !== undefined && typeof value.showServerList !== 'boolean') return null;
+    if (value.servers.length < 1 || value.servers.length > 20) return null;
 
     const ids = new Set();
     const servers = [];
@@ -34,7 +30,7 @@ const normalizeLiveTvConfig = (value) => {
         ids.add(id);
         servers.push({ id, label, url });
     }
-    return { position: value.position, showServerList: value.showServerList !== false, servers };
+    return { servers };
 };
 
 const requireAdmin = (req, res, next) => {
