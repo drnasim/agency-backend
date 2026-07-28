@@ -7,6 +7,7 @@ const DEFAULT_GUIDELINE_CATEGORIES = Object.freeze([
     'Transition',
     'Audio'
 ]);
+const GUIDELINE_CATEGORY_CATALOG_VERSION = 2;
 
 const normalizeGuidelineCategoryName = value => (
     String(value || '').trim().replace(/\s+/g, ' ')
@@ -30,11 +31,54 @@ const normalizeStoredGuidelineCategories = (values = []) => {
     return categories;
 };
 
-const buildGuidelineCategoryCatalog = customCategories => ([
-    ...DEFAULT_GUIDELINE_CATEGORIES.map(name => ({ name, isDefault: true })),
-    ...normalizeStoredGuidelineCategories(customCategories)
+const normalizeFullGuidelineCategories = (values = []) => {
+    const seen = new Set();
+    const categories = [];
+
+    for (const value of Array.isArray(values) ? values : []) {
+        const name = normalizeGuidelineCategoryName(
+            typeof value === 'string' ? value : value?.name
+        );
+        const key = name.toLowerCase();
+        if (!name || name.length > 60 || seen.has(key)) continue;
+        seen.add(key);
+        categories.push(name);
+    }
+
+    return categories;
+};
+
+const isVersionedGuidelineCategoryCatalog = values => (
+    Array.isArray(values) &&
+    values.length === 1 &&
+    Number(values[0]?.version) === GUIDELINE_CATEGORY_CATALOG_VERSION &&
+    Array.isArray(values[0]?.categories)
+);
+
+const getGuidelineCategoryNames = (storedValues = []) => {
+    if (isVersionedGuidelineCategoryCatalog(storedValues)) {
+        return normalizeFullGuidelineCategories(storedValues[0].categories);
+    }
+
+    return [
+        ...DEFAULT_GUIDELINE_CATEGORIES,
+        ...normalizeStoredGuidelineCategories(storedValues)
+    ];
+};
+
+const serializeGuidelineCategoryCatalog = categoryNames => ([{
+    version: GUIDELINE_CATEGORY_CATALOG_VERSION,
+    categories: normalizeFullGuidelineCategories(categoryNames)
+}]);
+
+const formatGuidelineCategoryCatalog = categoryNames => (
+    normalizeFullGuidelineCategories(categoryNames)
         .map(name => ({ name, isDefault: false }))
-]);
+);
+
+const buildGuidelineCategoryCatalog = storedValues => (
+    formatGuidelineCategoryCatalog(getGuidelineCategoryNames(storedValues))
+);
 
 const createHttpError = (statusCode, message) => {
     const error = new Error(message);
@@ -72,7 +116,8 @@ const canonicalizeGuidelineItemCategories = (items, catalog) => {
         const value = typeof item?.toObject === 'function'
             ? item.toObject()
             : item;
-        const category = validateGuidelineCategoryName(value?.category);
+        const category = normalizeGuidelineCategoryName(value?.category);
+        if (!category) return { ...value, category: '' };
         const canonicalName = canonicalNames.get(category.toLowerCase());
         if (!canonicalName) {
             throw createHttpError(
@@ -86,11 +131,17 @@ const canonicalizeGuidelineItemCategories = (items, catalog) => {
 
 module.exports = {
     DEFAULT_GUIDELINE_CATEGORIES,
+    GUIDELINE_CATEGORY_CATALOG_VERSION,
     buildGuidelineCategoryCatalog,
     canonicalizeGuidelineItemCategories,
     createHttpError,
+    formatGuidelineCategoryCatalog,
     getGuidelineCategoryCatalog,
+    getGuidelineCategoryNames,
+    isVersionedGuidelineCategoryCatalog,
+    normalizeFullGuidelineCategories,
     normalizeGuidelineCategoryName,
     normalizeStoredGuidelineCategories,
+    serializeGuidelineCategoryCatalog,
     validateGuidelineCategoryName
 };

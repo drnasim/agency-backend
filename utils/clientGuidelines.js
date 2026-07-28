@@ -57,7 +57,8 @@ const prioritizeMustUseGuidelines = (items = []) => (
 const buildLegacyGuidelines = (items = [], additionalNotes = '') => {
     const itemBlocks = prioritizeMustUseGuidelines(Array.isArray(items) ? items : [])
         .map((item) => {
-            const lines = [`[${item.ruleType}] ${item.category}: ${item.instruction}`];
+            const categoryLabel = item.category || 'Uncategorized';
+            const lines = [`[${item.ruleType}] ${categoryLabel}: ${item.instruction}`];
 
             if (item.referenceUrl) {
                 const referenceLabel = item.referenceName

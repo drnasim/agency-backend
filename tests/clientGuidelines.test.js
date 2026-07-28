@@ -100,12 +100,29 @@ test('client schema rejects incomplete rules, invalid enums, and unsafe referenc
         client.validate(),
         error => Boolean(
             error.name === 'ValidationError' &&
-            error.errors['guidelineItems.0.category'] &&
             error.errors['guidelineItems.0.instruction'] &&
             error.errors['guidelineItems.0.ruleType'] &&
             error.errors['guidelineItems.0.referenceType'] &&
             error.errors['guidelineItems.0.referenceUrl']
         )
+    );
+});
+
+test('structured guideline items allow an empty Uncategorized category', async () => {
+    const client = new Client({
+        name: 'Acme Studio',
+        guidelineItems: [{
+            category: '',
+            instruction: 'Keep the pacing energetic.',
+            ruleType: 'Prefer'
+        }]
+    });
+
+    await client.validate();
+    assert.equal(client.guidelineItems[0].category, '');
+    assert.equal(
+        buildLegacyGuidelines(client.guidelineItems),
+        '[Prefer] Uncategorized: Keep the pacing energetic.'
     );
 });
 
@@ -248,6 +265,23 @@ test('structured client writes canonicalize known categories and reject stale na
     );
     assert.equal(payload.guidelineItems[0].category, 'Brand Voice');
     assert.match(payload.guidelines, /\[Prefer\] Brand Voice:/);
+
+    const uncategorizedPayload = await clientRoutes.prepareClientWritePayload(
+        {
+            guidelineItems: [{
+                category: ' ',
+                instruction: 'Keep it concise.',
+                ruleType: 'Prefer'
+            }]
+        },
+        null,
+        settingsModel
+    );
+    assert.equal(uncategorizedPayload.guidelineItems[0].category, '');
+    assert.equal(
+        uncategorizedPayload.guidelines,
+        '[Prefer] Uncategorized: Keep it concise.'
+    );
 
     await assert.rejects(
         clientRoutes.prepareClientWritePayload(

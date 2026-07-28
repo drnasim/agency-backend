@@ -17,8 +17,8 @@ const isSafeHttpUrl = (value) => {
 const guidelineItemSchema = new mongoose.Schema({
     category: {
         type: String,
-        required: [true, 'Guideline category is required'],
         trim: true,
+        default: '',
         maxlength: [60, 'Guideline category cannot exceed 60 characters']
     },
     instruction: {
