@@ -5,6 +5,7 @@ const clientSchema = new mongoose.Schema({
     email: { type: String },
     company: { type: String },
     phone: { type: String }, // ফোন নাম্বারের জন্য
+    guidelines: { type: String, default: '' },
     socials: [{
         platform: { type: String },
         link: { type: String }

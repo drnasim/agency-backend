@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Project = require('../models/Project');
+const Client = require('../models/Client');
 const { alarmUsers } = require('../fcm');
 const { resolveNotificationRecipient } = require('../utils/notificationRecipients');
 const { authenticate } = require('../middleware/authenticate');
@@ -226,6 +227,20 @@ const formatCompletedEditorProject = (project) => {
     };
 };
 
+const resolveClientGuidelines = async (clientName, clientModel = Client) => {
+    const resolvedClientName = typeof clientName === 'string'
+        ? clientName
+        : String(clientName || '');
+    if (!resolvedClientName.trim()) return '';
+
+    const client = await clientModel.findOne(
+        { name: resolvedClientName },
+        { guidelines: 1, _id: 0 }
+    ).lean();
+
+    return typeof client?.guidelines === 'string' ? client.guidelines : '';
+};
+
 // সব প্রজেক্ট দেখার API (পেজিনেশন ও মাল্টিপল ফিল্টার সাপোর্ট সহ)
 router.get('/', async (req, res) => {
     try {
@@ -337,6 +352,7 @@ router.get('/:id', async (req, res) => {
         
         if (project) {
             project.editor = project.editor || project.assignedTo || project.assignedEditor || 'Unassigned';
+            project.clientGuidelines = await resolveClientGuidelines(project.client);
         }
 
         res.status(200).json(project);
@@ -487,3 +503,4 @@ module.exports.buildProjectUpdate = buildProjectUpdate;
 module.exports.getProjectNotificationEventId = getProjectNotificationEventId;
 module.exports.getSubmissionNotificationRecipients = getSubmissionNotificationRecipients;
 module.exports.getProjectNotificationUrl = getProjectNotificationUrl;
+module.exports.resolveClientGuidelines = resolveClientGuidelines;
