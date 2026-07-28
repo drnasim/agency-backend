@@ -39,6 +39,14 @@ const authenticate = async (req, res, next) => {
     }
 };
 
+const requireAdmin = (req, res, next) => {
+    const roles = Array.isArray(req.user?.role) ? req.user.role : [req.user?.role];
+    if (!roles.includes('Admin')) {
+        return res.status(403).json({ error: 'Admin access is required' });
+    }
+    return next();
+};
+
 // Existing chat sockets remain backwards compatible. Only sockets presenting a
 // valid session are attached to the private, server-derived notification room.
 const attachAuthenticatedSocketUser = async (socket, next) => {
@@ -54,4 +62,11 @@ const attachAuthenticatedSocketUser = async (socket, next) => {
     return next();
 };
 
-module.exports = { authenticate, attachAuthenticatedSocketUser, createAuthToken, findUserForToken, getJwtSecret };
+module.exports = {
+    authenticate,
+    attachAuthenticatedSocketUser,
+    createAuthToken,
+    findUserForToken,
+    getJwtSecret,
+    requireAdmin
+};

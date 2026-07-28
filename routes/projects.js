@@ -7,6 +7,7 @@ const { resolveNotificationRecipient } = require('../utils/notificationRecipient
 const { authenticate } = require('../middleware/authenticate');
 const { deliverNotificationToReferences } = require('../services/notificationDelivery');
 const { resolveUsersForReferences } = require('../services/pushRecipients');
+const { buildClientGuidelineData } = require('../utils/clientGuidelines');
 
 const REVIEW_STATUSES = new Set(['Submitted', 'Under Review']);
 
@@ -241,6 +242,25 @@ const resolveClientGuidelines = async (clientName, clientModel = Client) => {
     return typeof client?.guidelines === 'string' ? client.guidelines : '';
 };
 
+const resolveClientGuidelineData = async (clientName, clientModel = Client) => {
+    const resolvedClientName = typeof clientName === 'string'
+        ? clientName
+        : String(clientName || '');
+    if (!resolvedClientName.trim()) return buildClientGuidelineData(null);
+
+    const client = await clientModel.findOne(
+        { name: resolvedClientName },
+        {
+            guidelines: 1,
+            guidelineItems: 1,
+            guidelineNotes: 1,
+            _id: 0
+        }
+    ).lean();
+
+    return buildClientGuidelineData(client);
+};
+
 // সব প্রজেক্ট দেখার API (পেজিনেশন ও মাল্টিপল ফিল্টার সাপোর্ট সহ)
 router.get('/', async (req, res) => {
     try {
@@ -352,7 +372,9 @@ router.get('/:id', async (req, res) => {
         
         if (project) {
             project.editor = project.editor || project.assignedTo || project.assignedEditor || 'Unassigned';
-            project.clientGuidelines = await resolveClientGuidelines(project.client);
+            const guidelineData = await resolveClientGuidelineData(project.client);
+            project.clientGuidelines = guidelineData.clientGuidelines;
+            project.clientGuidelineProfile = guidelineData.clientGuidelineProfile;
         }
 
         res.status(200).json(project);
@@ -503,4 +525,5 @@ module.exports.buildProjectUpdate = buildProjectUpdate;
 module.exports.getProjectNotificationEventId = getProjectNotificationEventId;
 module.exports.getSubmissionNotificationRecipients = getSubmissionNotificationRecipients;
 module.exports.getProjectNotificationUrl = getProjectNotificationUrl;
+module.exports.resolveClientGuidelineData = resolveClientGuidelineData;
 module.exports.resolveClientGuidelines = resolveClientGuidelines;

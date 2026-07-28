@@ -5,7 +5,16 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const cron = require('node-cron');
+const { authenticate, requireAdmin } = require('../middleware/authenticate');
+const {
+    detectGuidelineImageMimeType,
+    GUIDELINE_IMAGE_MAX_BYTES,
+    GUIDELINE_IMAGE_MIME_TYPES,
+    isAllowedGuidelineImageMimeType,
+    normalizeGuidelineImageReferenceName
+} = require('../utils/guidelineImages');
 
 // ✅ OOM Fix: memoryStorage → diskStorage (ফাইল RAM এ না রেখে ডিস্কে টেম্প ফাইল হিসেবে রাখবে)
 const tmpDir = path.join(os.tmpdir(), 'fortivus-uploads');
@@ -16,6 +25,27 @@ const diskStorage = multer.diskStorage({
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 });
 const upload = multer({ storage: diskStorage, limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB
+const guidelineImageStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, tmpDir),
+    filename: (req, file, cb) => cb(
+        null,
+        `guideline-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`
+    )
+});
+const guidelineImageUpload = multer({
+    storage: guidelineImageStorage,
+    limits: { fileSize: GUIDELINE_IMAGE_MAX_BYTES, files: 1 },
+    fileFilter: (req, file, callback) => {
+        if (!isAllowedGuidelineImageMimeType(file.mimetype)) {
+            const error = new Error(
+                `Guideline images must be one of: ${GUIDELINE_IMAGE_MIME_TYPES.join(', ')}`
+            );
+            error.code = 'UNSUPPORTED_GUIDELINE_IMAGE';
+            return callback(error);
+        }
+        return callback(null, true);
+    }
+});
 
 // ==============================================================
 // হেল্পার ফাংশন: ড্রাইভে ফোল্ডার খোঁজা বা নতুন করে তৈরি করা
@@ -141,6 +171,111 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     }
 });
 
+const parseGuidelineImageUpload = (req, res, next) => {
+    guidelineImageUpload.single('file')(req, res, (error) => {
+        if (!error) return next();
+
+        cleanupTempFile(req.file?.path);
+        const isTooLarge = error.code === 'LIMIT_FILE_SIZE';
+        return res.status(isTooLarge ? 413 : 415).json({
+            error: isTooLarge
+                ? 'Guideline images cannot exceed 8 MB'
+                : error.message
+        });
+    });
+};
+
+const readGuidelineImageMimeType = async (filePath) => {
+    const handle = await fs.promises.open(filePath, 'r');
+    try {
+        const signature = Buffer.alloc(12);
+        const { bytesRead } = await handle.read(signature, 0, signature.length, 0);
+        return detectGuidelineImageMimeType(signature.subarray(0, bytesRead));
+    } finally {
+        await handle.close();
+    }
+};
+
+// Guideline references are long-lived assets. They deliberately use a distinct
+// source tag so the project-upload cleanup job below never removes them.
+router.post(
+    '/guideline-image',
+    authenticate,
+    requireAdmin,
+    parseGuidelineImageUpload,
+    async (req, res) => {
+        const tempFilePath = req.file?.path;
+        let uploadedFileId = '';
+        let driveClient = null;
+
+        try {
+            if (!req.file) {
+                return res.status(400).json({ error: 'No image uploaded' });
+            }
+
+            const detectedMimeType = await readGuidelineImageMimeType(tempFilePath);
+            if (detectedMimeType !== String(req.file.mimetype || '').toLowerCase()) {
+                cleanupTempFile(tempFilePath);
+                return res.status(415).json({
+                    error: 'Uploaded file content does not match its image type'
+                });
+            }
+
+            const { drive, mainFolderId } = getAuth();
+            driveClient = drive;
+            const referenceName = normalizeGuidelineImageReferenceName(
+                path.basename(req.file.originalname)
+            );
+            const guidelineFolderId = await getOrCreateFolder(
+                drive,
+                'Client_Guideline_References',
+                mainFolderId
+            );
+            const fileStream = fs.createReadStream(tempFilePath);
+            const response = await drive.files.create({
+                requestBody: {
+                    name: referenceName,
+                    parents: [guidelineFolderId],
+                    appProperties: { source: 'fortivus_guideline_reference' }
+                },
+                media: {
+                    mimeType: req.file.mimetype,
+                    body: fileStream
+                },
+                fields: 'id'
+            });
+
+            uploadedFileId = response.data.id;
+            await drive.permissions.create({
+                fileId: uploadedFileId,
+                requestBody: { role: 'reader', type: 'anyone' }
+            });
+
+            cleanupTempFile(tempFilePath);
+            return res.status(201).json({
+                fileUrl: `https://drive.google.com/uc?export=view&id=${encodeURIComponent(uploadedFileId)}`,
+                viewUrl: `https://drive.google.com/file/d/${encodeURIComponent(uploadedFileId)}/view`,
+                referenceType: 'image',
+                referenceName
+            });
+        } catch (err) {
+            cleanupTempFile(tempFilePath);
+            if (uploadedFileId && driveClient) {
+                try {
+                    await driveClient.files.delete({ fileId: uploadedFileId });
+                } catch (cleanupError) {
+                    console.error(
+                        'Orphaned guideline image cleanup error:',
+                        cleanupError.message
+                    );
+                }
+            }
+            console.error('Guideline image upload error:', err);
+            return res.status(500).json({ error: 'Failed to upload guideline image' });
+        }
+    }
+);
+
 // ==============================================================
 // ৯০ দিন পর অটো-ডিলিট হওয়ার সিস্টেম (প্রতিদিন রাত ১২টায় চেক করবে)
 // ==============================================================
@@ -176,3 +311,10 @@ cron.schedule('0 0 * * *', async () => {
 });
 
 module.exports = router;
+module.exports.GUIDELINE_IMAGE_MAX_BYTES = GUIDELINE_IMAGE_MAX_BYTES;
+module.exports.GUIDELINE_IMAGE_MIME_TYPES = GUIDELINE_IMAGE_MIME_TYPES;
+module.exports.detectGuidelineImageMimeType = detectGuidelineImageMimeType;
+module.exports.isAllowedGuidelineImageMimeType = isAllowedGuidelineImageMimeType;
+module.exports.normalizeGuidelineImageReferenceName = normalizeGuidelineImageReferenceName;
+module.exports.parseGuidelineImageUpload = parseGuidelineImageUpload;
+module.exports.readGuidelineImageMimeType = readGuidelineImageMimeType;

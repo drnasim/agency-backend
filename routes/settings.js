@@ -1,7 +1,134 @@
 const express = require('express');
 const router = express.Router();
 const Settings = require('../models/Settings'); // Railway-এর এরর এড়াতে ছোট হাতের 's' করা হলো
-const { authenticate } = require('../middleware/authenticate');
+const Client = require('../models/Client');
+const { authenticate, requireAdmin } = require('../middleware/authenticate');
+const { buildLegacyGuidelines } = require('../utils/clientGuidelines');
+const {
+    DEFAULT_GUIDELINE_CATEGORIES,
+    buildGuidelineCategoryCatalog,
+    createHttpError,
+    getGuidelineCategoryCatalog,
+    normalizeGuidelineCategoryName,
+    normalizeStoredGuidelineCategories,
+    validateGuidelineCategoryName
+} = require('../utils/guidelineCategories');
+
+const getGuidelineCategorySettings = async (settingsModel = Settings) => {
+    return getGuidelineCategoryCatalog(settingsModel);
+};
+
+const loadWritableGuidelineCategorySettings = async (settingsModel = Settings) => {
+    let settings = await settingsModel.findOne({ type: 'guidelineCategories' });
+    if (!settings) {
+        settings = new settingsModel({ type: 'guidelineCategories', payments: [] });
+    }
+    settings.payments = normalizeStoredGuidelineCategories(settings.payments);
+    return settings;
+};
+
+const addGuidelineCategory = async (value, settingsModel = Settings) => {
+    const name = validateGuidelineCategoryName(value);
+    const settings = await loadWritableGuidelineCategorySettings(settingsModel);
+    const catalog = buildGuidelineCategoryCatalog(settings.payments);
+
+    if (catalog.some(category => category.name.toLowerCase() === name.toLowerCase())) {
+        throw createHttpError(409, 'A guideline category with this name already exists');
+    }
+
+    settings.payments = [...settings.payments, name];
+    await settings.save();
+    return buildGuidelineCategoryCatalog(settings.payments);
+};
+
+const escapeRegex = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const renameGuidelineCategory = async (
+    currentValue,
+    nextValue,
+    settingsModel = Settings,
+    clientModel = Client
+) => {
+    const currentName = validateGuidelineCategoryName(currentValue);
+    const nextName = validateGuidelineCategoryName(nextValue);
+    const currentKey = currentName.toLowerCase();
+    const nextKey = nextName.toLowerCase();
+
+    if (DEFAULT_GUIDELINE_CATEGORIES.some(name => name.toLowerCase() === currentKey)) {
+        throw createHttpError(400, 'Default guideline categories cannot be renamed');
+    }
+
+    const settings = await loadWritableGuidelineCategorySettings(settingsModel);
+    const categoryIndex = settings.payments.findIndex(
+        name => name.toLowerCase() === currentKey
+    );
+    if (categoryIndex === -1) throw createHttpError(404, 'Guideline category not found');
+
+    const duplicate = buildGuidelineCategoryCatalog(settings.payments).some(
+        category => (
+            category.name.toLowerCase() === nextKey &&
+            category.name.toLowerCase() !== currentKey
+        )
+    );
+    if (duplicate) {
+        throw createHttpError(409, 'A guideline category with this name already exists');
+    }
+
+    const storedCurrentName = settings.payments[categoryIndex];
+    const exactCategory = new RegExp(`^${escapeRegex(storedCurrentName)}$`, 'i');
+    const clients = await clientModel.find({ 'guidelineItems.category': exactCategory });
+
+    settings.payments[categoryIndex] = nextName;
+    if (typeof settings.markModified === 'function') settings.markModified('payments');
+    await settings.save();
+
+    for (const client of clients) {
+        for (const item of client.guidelineItems || []) {
+            if (normalizeGuidelineCategoryName(item.category).toLowerCase() === currentKey) {
+                item.category = nextName;
+            }
+        }
+        client.guidelines = buildLegacyGuidelines(
+            client.guidelineItems,
+            client.guidelineNotes
+        );
+        await client.save();
+    }
+
+    return buildGuidelineCategoryCatalog(settings.payments);
+};
+
+const deleteGuidelineCategory = async (
+    value,
+    settingsModel = Settings,
+    clientModel = Client
+) => {
+    const name = validateGuidelineCategoryName(value);
+    const key = name.toLowerCase();
+    if (DEFAULT_GUIDELINE_CATEGORIES.some(defaultName => defaultName.toLowerCase() === key)) {
+        throw createHttpError(400, 'Default guideline categories cannot be deleted');
+    }
+
+    const settings = await loadWritableGuidelineCategorySettings(settingsModel);
+    const categoryIndex = settings.payments.findIndex(
+        categoryName => categoryName.toLowerCase() === key
+    );
+    if (categoryIndex === -1) throw createHttpError(404, 'Guideline category not found');
+
+    const storedName = settings.payments[categoryIndex];
+    const exactCategory = new RegExp(`^${escapeRegex(storedName)}$`, 'i');
+    if (await clientModel.exists({ 'guidelineItems.category': exactCategory })) {
+        throw createHttpError(
+            409,
+            'This guideline category is in use and cannot be deleted'
+        );
+    }
+
+    settings.payments.splice(categoryIndex, 1);
+    if (typeof settings.markModified === 'function') settings.markModified('payments');
+    await settings.save();
+    return buildGuidelineCategoryCatalog(settings.payments);
+};
 
 const DEFAULT_LIVE_TV_CONFIG = Object.freeze({
     servers: [
@@ -33,12 +160,6 @@ const normalizeLiveTvConfig = (value) => {
     return { servers };
 };
 
-const requireAdmin = (req, res, next) => {
-    const roles = Array.isArray(req.user?.role) ? req.user.role : [req.user?.role];
-    if (!roles.includes('Admin')) return res.status(403).json({ error: 'Admin access is required' });
-    return next();
-};
-
 router.get('/live-tv', authenticate, async (req, res) => {
     try {
         const settings = await Settings.findOne({ type: 'liveTvConfig' }).lean();
@@ -62,6 +183,45 @@ router.put('/live-tv', authenticate, requireAdmin, async (req, res) => {
         return res.json(config);
     } catch (err) {
         return res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/guideline-categories', async (req, res) => {
+    try {
+        const categories = await getGuidelineCategorySettings();
+        return res.status(200).json({ categories });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/guideline-categories', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const categories = await addGuidelineCategory(req.body?.name);
+        return res.status(201).json({ categories });
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: err.message });
+    }
+});
+
+router.put('/guideline-categories/:name', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const categories = await renameGuidelineCategory(
+            req.params.name,
+            req.body?.name
+        );
+        return res.status(200).json({ categories });
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: err.message });
+    }
+});
+
+router.delete('/guideline-categories/:name', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const categories = await deleteGuidelineCategory(req.params.name);
+        return res.status(200).json({ categories });
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: err.message });
     }
 });
 
@@ -193,4 +353,13 @@ router.put('/drive', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.DEFAULT_GUIDELINE_CATEGORIES = DEFAULT_GUIDELINE_CATEGORIES;
+module.exports.addGuidelineCategory = addGuidelineCategory;
+module.exports.buildGuidelineCategoryCatalog = buildGuidelineCategoryCatalog;
+module.exports.deleteGuidelineCategory = deleteGuidelineCategory;
+module.exports.getGuidelineCategorySettings = getGuidelineCategorySettings;
 module.exports.normalizeLiveTvConfig = normalizeLiveTvConfig;
+module.exports.normalizeGuidelineCategoryName = normalizeGuidelineCategoryName;
+module.exports.normalizeStoredGuidelineCategories = normalizeStoredGuidelineCategories;
+module.exports.renameGuidelineCategory = renameGuidelineCategory;
+module.exports.requireAdmin = requireAdmin;
