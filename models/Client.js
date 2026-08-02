@@ -89,7 +89,11 @@ const clientSchema = new mongoose.Schema({
         platform: { type: String },
         link: { type: String }
     }], // আনলিমিটেড সোশ্যাল মিডিয়া লিংকের জন্য
-    paymentMethod: { type: String, default: 'Global Default' }
+    paymentMethod: { type: String, default: 'Global Default' },
+    paymentMethodIds: {
+        type: [String],
+        default: []
+    }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Client', clientSchema);

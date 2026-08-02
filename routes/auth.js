@@ -5,12 +5,23 @@ const bcrypt = require('bcryptjs');
 const { sendFcmAlarm, sendFcmNotification } = require('../fcm');
 const { createAuthToken } = require('../middleware/authenticate');
 
+const PUBLIC_USER_FIELDS = 'name email role profilePic';
+
 const buildLoginResponse = (user, primaryRole) => ({
     name: user.name,
     email: user.email,
     role: Array.isArray(user.role) ? user.role : [user.role],
     primaryRole,
+    profilePic: user.profilePic || '',
     token: createAuthToken(user)
+});
+
+const buildProfileUpdatedPayload = (user, previousName) => ({
+    _id: user?._id?.toString?.() || '',
+    name: String(user?.name || ''),
+    previousName: String(previousName || ''),
+    email: String(user?.email || ''),
+    profilePic: String(user?.profilePic || '')
 });
 
 // নতুন ইউজার/এডিটর রেজিস্টার করার API
@@ -126,6 +137,8 @@ router.put('/update', async (req, res) => {
         const user = await User.findOne({ email: currentEmail });
         if (!user) return res.status(404).json({ error: "User not found!" });
 
+        const previousName = user.name;
+
         // আপডেট করার সময় ফোন নাম্বার ইউনিক কি না সেটা চেক করা
         if (phone && phone.trim() !== "" && phone !== user.phone) {
             const existingPhone = await User.findOne({ phone: phone });
@@ -151,6 +164,10 @@ router.put('/update', async (req, res) => {
         const roleArray = Array.isArray(updatedUser.role) ? updatedUser.role : [updatedUser.role];
         const primaryRole = roleArray.includes('Admin') ? 'Admin' : roleArray.includes('Marketer') ? 'Marketer' : 'Editor';
 
+        if (global.io) {
+            global.io.emit('profile_updated', buildProfileUpdatedPayload(updatedUser, previousName));
+        }
+
         res.status(200).json({ 
             message: "Profile updated successfully!", 
             name: updatedUser.name, 
@@ -174,9 +191,9 @@ router.get('/users', async (req, res) => {
         const { role } = req.query;
         let users;
         if (role) {
-            users = await User.find({ role: role }).select('name email role');
+            users = await User.find({ role: role }).select(PUBLIC_USER_FIELDS);
         } else {
-            users = await User.find({}).select('name email role');
+            users = await User.find({}).select(PUBLIC_USER_FIELDS);
         }
         res.json(users);
     } catch (err) {
@@ -251,3 +268,6 @@ router.post('/debug-notify', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.PUBLIC_USER_FIELDS = PUBLIC_USER_FIELDS;
+module.exports.buildLoginResponse = buildLoginResponse;
+module.exports.buildProfileUpdatedPayload = buildProfileUpdatedPayload;

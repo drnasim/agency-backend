@@ -58,6 +58,18 @@ test('client schema stores reusable guidelines as optional plain text', () => {
     assert.equal(guidelinesPath.defaultValue, '');
 });
 
+test('client schema stores stable configured payment method references', async () => {
+    const client = new Client({
+        name: 'Acme Studio',
+        paymentMethod: 'Bank Transfer (USD) — Bangladesh',
+        paymentMethodIds: [1785518282578, 'crypto-wallet-id']
+    });
+
+    await client.validate();
+
+    assert.deepEqual(client.paymentMethodIds, ['1785518282578', 'crypto-wallet-id']);
+});
+
 test('client schema validates and normalizes structured guideline items', async () => {
     const client = new Client({
         name: 'Acme Studio',
