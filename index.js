@@ -18,6 +18,7 @@ const { resolveUsersForReferences } = require('./services/pushRecipients');
 
 const app = express();
 const server = http.createServer(app); 
+let isShuttingDown = false;
 
 const DAILY_LIMIT_TIMEZONE = process.env.DAILY_LIMIT_TIMEZONE || process.env.TZ || 'UTC';
 
@@ -89,6 +90,20 @@ app.use(express.json());
 
 app.get('/', (req, res) => {
     res.send('🚀 Fortivus Group Agency Server is running and healthy!');
+});
+
+app.get('/health/live', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
+app.get('/health/ready', (req, res) => {
+    const databaseConnected = mongoose.connection.readyState === 1;
+    const ready = server.listening && databaseConnected && !isShuttingDown;
+
+    res.status(ready ? 200 : 503).json({
+        status: ready ? 'ready' : 'not_ready',
+        database: databaseConnected ? 'connected' : 'disconnected'
+    });
 });
 
 const projectRoutes = require('./routes/projects');
@@ -221,10 +236,9 @@ io.on('connection', (socket) => {
 });
 
 const MONGO_URI = String(process.env.MONGO_URI || '').trim();
-if (!MONGO_URI) throw new Error('MONGO_URI is required');
 
-mongoose.connect(MONGO_URI)
-    .then(async () => {
+const runStartupMaintenance = async () => {
+    try {
         // Legacy records used a nested, unauthenticated subscription object and cannot
         // be delivered after the mandatory VAPID rotation. Remove them without logging keys.
         const PushSubscription = require('./models/PushSubscription');
@@ -232,14 +246,15 @@ mongoose.connect(MONGO_URI)
             $or: [{ endpoint: { $exists: false } }, { userId: { $exists: false } }]
         });
         await PushSubscription.syncIndexes();
-        console.log('✅ MongoDB is Connected Successfully!');
         if (legacyCleanup.deletedCount) {
             console.log(`Removed ${legacyCleanup.deletedCount} legacy browser push subscription(s)`);
         }
-    })
-    .catch((err) => {
-        console.log('❌ DB Connection Error:', err.message);
-    });
+    } catch (err) {
+        // Maintenance should be observable, but it must not make an otherwise healthy
+        // database connection unavailable to the application.
+        console.error('❌ Startup maintenance failed:', err.message);
+    }
+};
 
 // ====================== CRON: sentToday রিসেট প্রতিদিন মধ্যরাতে ======================
 const getWarmupLimit = (day) => {
@@ -249,7 +264,7 @@ const getWarmupLimit = (day) => {
     return 50;
 };
 
-cron.schedule('0 0 * * *', async () => {
+const runDailyEmailMaintenance = async () => {
     try {
         const todayKey = getDailyLimitDateKey();
         await EmailAccount.updateMany({}, { sentToday: 0, sentTodayDate: todayKey });
@@ -268,10 +283,120 @@ cron.schedule('0 0 * * *', async () => {
     } catch (err) {
         console.error('❌ Cron job failed:', err.message);
     }
-});
+};
 
 const PORT = process.env.PORT || 8080;
+const MONGO_CONNECT_OPTIONS = {
+    serverSelectionTimeoutMS: 15000,
+    connectTimeoutMS: 15000
+};
 
-server.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
+let dailyResetTask = null;
+let startPromise = null;
+let stopPromise = null;
+
+const listen = () => new Promise((resolve, reject) => {
+    const handleListenError = (error) => {
+        server.off('listening', handleListening);
+        reject(error);
+    };
+    const handleListening = () => {
+        server.off('error', handleListenError);
+        resolve();
+    };
+
+    server.once('error', handleListenError);
+    server.once('listening', handleListening);
+    server.listen(PORT);
 });
+
+const startServer = () => {
+    if (startPromise) return startPromise;
+
+    startPromise = (async () => {
+        if (!MONGO_URI) throw new Error('MONGO_URI is required');
+
+        await mongoose.connect(MONGO_URI, MONGO_CONNECT_OPTIONS);
+        console.log('✅ MongoDB is Connected Successfully!');
+
+        await runStartupMaintenance();
+        await listen();
+
+        dailyResetTask = cron.schedule('0 0 * * *', runDailyEmailMaintenance);
+        console.log(`🚀 Server is running on port ${PORT}`);
+        return server;
+    })();
+
+    return startPromise;
+};
+
+const closeHttpServer = () => new Promise((resolve, reject) => {
+    if (!server.listening) {
+        server.closeAllConnections?.();
+        resolve();
+        return;
+    }
+
+    server.close((error) => {
+        if (error) reject(error);
+        else {
+            server.closeAllConnections?.();
+            resolve();
+        }
+    });
+    server.closeIdleConnections?.();
+});
+
+const stopServer = () => {
+    if (stopPromise) return stopPromise;
+
+    isShuttingDown = true;
+    stopPromise = (async () => {
+        dailyResetTask?.stop();
+        dailyResetTask = null;
+
+        io.disconnectSockets(true);
+        await closeHttpServer();
+
+        if (mongoose.connection.readyState !== 0) {
+            await mongoose.disconnect();
+        }
+    })();
+
+    return stopPromise;
+};
+
+const shutdownFromSignal = async (signal) => {
+    console.log(`${signal} received; shutting down gracefully.`);
+    try {
+        await stopServer();
+        process.exit(0);
+    } catch (error) {
+        console.error('❌ Graceful shutdown failed:', error.message);
+        process.exit(1);
+    }
+};
+
+if (require.main === module) {
+    process.once('SIGTERM', () => shutdownFromSignal('SIGTERM'));
+    process.once('SIGINT', () => shutdownFromSignal('SIGINT'));
+
+    startServer().catch(async (error) => {
+        console.error('❌ Server startup failed:', error.message);
+        try {
+            await stopServer();
+        } catch (shutdownError) {
+            console.error('❌ Startup cleanup failed:', shutdownError.message);
+        }
+        process.exit(1);
+    });
+}
+
+module.exports = {
+    app,
+    runDailyEmailMaintenance,
+    runStartupMaintenance,
+    server,
+    startServer,
+    stopServer
+};
