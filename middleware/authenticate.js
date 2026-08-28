@@ -47,19 +47,22 @@ const requireAdmin = (req, res, next) => {
     return next();
 };
 
-// Existing chat sockets remain backwards compatible. Only sockets presenting a
-// valid session are attached to the private, server-derived notification room.
+// Existing chat sockets remain backwards compatible when they do not present a
+// token. A client that explicitly claims an authenticated session must prove it
+// before Socket.IO reports a successful connection; otherwise mobile clients
+// could incorrectly show "Connected" without access to their private room.
 const attachAuthenticatedSocketUser = async (socket, next) => {
     const token = String(socket.handshake?.auth?.token || '').trim();
     if (!token) return next();
 
     try {
         const user = await findUserForToken(token);
-        if (user) socket.authenticatedUser = user;
+        if (!user) return next(new Error('Socket authentication failed'));
+        socket.authenticatedUser = user;
+        return next();
     } catch {
-        // An invalid optional socket token must not interrupt legacy chat events.
+        return next(new Error('Socket authentication failed'));
     }
-    return next();
 };
 
 module.exports = {

@@ -9,7 +9,8 @@ const {
     getAlarmTokensForUsers,
     getFcmTokensForUserIds,
     isRetryableAssignmentFcmError,
-    removeInvalidFcmToken
+    removeInvalidFcmToken,
+    truncateUtf8
 } = require('../fcm');
 
 const assignmentPayload = {
@@ -26,6 +27,7 @@ const assignmentPayload = {
     assignedAt: '2026-08-26T17:40:00.000Z',
     assignmentExpiresAt: '2026-08-26T17:42:00.000Z',
     ringTimeoutSeconds: 120,
+    projectUrl: '/project/project-1',
     title: 'New Project Assigned',
     body: 'Launch video has been assigned to you.'
 };
@@ -40,7 +42,38 @@ test('assignment FCM is high-priority data-only and remains deliverable after ri
     assert.equal(message.data.action, 'assigned');
     assert.equal(message.data.assignmentVersion, '2');
     assert.equal(message.data.assignmentExpiresAt, assignmentPayload.assignmentExpiresAt);
+    assert.equal(message.data.projectUrl, '/project/project-1');
     assert.ok(Object.values(message.data).every(value => typeof value === 'string'));
+});
+
+test('oversized assignment copy is UTF-8 bounded without changing acceptance identifiers', () => {
+    const oversized = '🎬'.repeat(5000);
+    const message = buildProjectAssignmentFcmMessage('device-token', {
+        ...assignmentPayload,
+        projectName: oversized,
+        clientName: oversized,
+        acceptedByName: oversized,
+        title: oversized,
+        body: oversized
+    });
+
+    assert.equal(message.data.action, assignmentPayload.action);
+    assert.equal(message.data.eventId, assignmentPayload.eventId);
+    assert.equal(message.data.assignmentRequestId, assignmentPayload.assignmentRequestId);
+    assert.equal(message.data.assignmentVersion, String(assignmentPayload.assignmentVersion));
+    assert.equal(message.data.projectId, assignmentPayload.projectId);
+    assert.ok(Buffer.byteLength(message.data.projectName, 'utf8') <= 240);
+    assert.ok(Buffer.byteLength(message.data.clientName, 'utf8') <= 160);
+    assert.ok(Buffer.byteLength(message.data.acceptedByName, 'utf8') <= 160);
+    assert.ok(Buffer.byteLength(message.data.title, 'utf8') <= 100);
+    assert.ok(Buffer.byteLength(message.data.body, 'utf8') <= 320);
+    assert.ok(Buffer.byteLength(JSON.stringify(message.data), 'utf8') < 4096);
+    assert.ok(Object.values(message.data).every(value => typeof value === 'string'));
+});
+
+test('UTF-8 truncation never splits a multibyte character', () => {
+    assert.equal(truncateUtf8('AB🎬CD', 6), 'AB🎬');
+    assert.equal(Buffer.byteLength(truncateUtf8('🎬'.repeat(100), 31), 'utf8'), 28);
 });
 
 test('transient assignment FCM failures retry before reporting delivery failure', async () => {

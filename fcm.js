@@ -12,6 +12,16 @@ const FCM_EVENT_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_PROJECT_ASSIGNMENT_FCM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_PROJECT_ASSIGNMENT_FCM_TTL_MS = 60 * 60 * 1000;
 const MAX_PROJECT_ASSIGNMENT_FCM_TTL_MS = 28 * 24 * 60 * 60 * 1000;
+// FCM data messages are limited to 4 KiB. Keep a conservative per-field
+// budget for user-controlled project copy while leaving immutable request,
+// project and event identifiers untouched for acceptance and ordering.
+const PROJECT_ASSIGNMENT_FCM_TEXT_LIMITS = Object.freeze({
+  projectName: 240,
+  clientName: 160,
+  acceptedByName: 160,
+  title: 100,
+  body: 320
+});
 const recentFcmEvents = new Map();
 
 const claimFcmEvent = (token, eventId, now = Date.now()) => {
@@ -116,6 +126,29 @@ const stringifyFcmData = value => {
   return data;
 };
 
+const truncateUtf8 = (value, maxBytes) => {
+  const text = String(value ?? '');
+  const limit = Math.max(0, Number(maxBytes) || 0);
+  if (Buffer.byteLength(text, 'utf8') <= limit) return text;
+
+  let result = '';
+  let usedBytes = 0;
+  // Iterating a string yields complete Unicode code points, so an emoji or
+  // other surrogate pair is never split while enforcing the byte budget.
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (usedBytes + characterBytes > limit) break;
+    result += character;
+    usedBytes += characterBytes;
+  }
+  return result;
+};
+
+const boundProjectAssignmentFcmText = (field, value) => truncateUtf8(
+  value,
+  PROJECT_ASSIGNMENT_FCM_TEXT_LIMITS[field]
+);
+
 const getProjectAssignmentFcmTtlMs = () => {
   const configuredSeconds = Number(process.env.PROJECT_ASSIGNMENT_FCM_TTL_SECONDS);
   if (!Number.isFinite(configuredSeconds)) return DEFAULT_PROJECT_ASSIGNMENT_FCM_TTL_MS;
@@ -136,8 +169,8 @@ const buildProjectAssignmentFcmMessage = (fcmToken, payload) => {
     assignmentVersion: payload?.assignmentVersion,
     assignmentStatus: payload?.assignmentStatus,
     projectId: payload?.projectId,
-    projectName: payload?.projectName,
-    clientName: payload?.clientName,
+    projectName: boundProjectAssignmentFcmText('projectName', payload?.projectName),
+    clientName: boundProjectAssignmentFcmText('clientName', payload?.clientName),
     deadline: payload?.deadline,
     priority: payload?.priority,
     assignedAt: payload?.assignedAt,
@@ -146,11 +179,14 @@ const buildProjectAssignmentFcmMessage = (fcmToken, payload) => {
     assignmentExpiresAt: payload?.assignmentExpiresAt,
     ringTimeoutSeconds: payload?.ringTimeoutSeconds,
     acceptedByUserId: payload?.acceptedByUserId,
-    acceptedByName: payload?.acceptedByName,
+    acceptedByName: boundProjectAssignmentFcmText('acceptedByName', payload?.acceptedByName),
     reason: payload?.reason,
     projectUrl: payload?.projectUrl,
-    title: payload?.title || (isIncoming ? 'New Project Assigned' : 'Project Assignment Updated'),
-    body: payload?.body || ''
+    title: boundProjectAssignmentFcmText(
+      'title',
+      payload?.title || (isIncoming ? 'New Project Assigned' : 'Project Assignment Updated')
+    ),
+    body: boundProjectAssignmentFcmText('body', payload?.body || '')
   });
 
   return {
@@ -335,5 +371,6 @@ module.exports = {
   sendFcmAlarm,
   sendFcmNotification,
   sendProjectAssignmentEventToUsers,
-  stringifyFcmData
+  stringifyFcmData,
+  truncateUtf8
 };

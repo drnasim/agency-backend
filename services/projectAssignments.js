@@ -18,6 +18,14 @@ const ASSIGNMENT_LIFECYCLE_FIELDS = new Set([
 ]);
 
 const TERMINAL_PROJECT_STATUSES = new Set(['completed', 'cancelled', 'canceled']);
+const ACTIVE_PROJECT_STATUSES = Object.freeze([
+    'Pending',
+    'In Progress',
+    'Submitted',
+    'Under Review',
+    'Revision'
+]);
+const LEGACY_EDITOR_FIELDS = Object.freeze(['assignedEditor', 'editor', 'assignedTo']);
 
 const createHttpError = (message, statusCode = 400, code = '') => {
     const error = new Error(message);
@@ -91,6 +99,63 @@ const resolveProjectAssignedUser = async project => {
     if (isUnassignedReference(reference)) return null;
     const users = await resolveUsersForReferences([reference]);
     return users[0] || null;
+};
+
+const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// New projects are scoped by an immutable user ID. During rollout, older
+// production records may only contain a display name/email in one of the
+// legacy editor fields. Limit the compatibility candidates to exact references
+// belonging to the authenticated editor; they are resolved and verified again
+// below before any project is returned.
+const buildActiveProjectFilter = user => {
+    const userId = String(user?._id || '').trim();
+    if (!userId) {
+        return {
+            _id: null,
+            status: { $in: [...ACTIVE_PROJECT_STATUSES] }
+        };
+    }
+
+    const legacyReferences = [...new Set([
+        userId,
+        String(user?.email || '').trim(),
+        String(user?.name || '').trim()
+    ].filter(Boolean))].map(reference => new RegExp(`^\\s*${escapeRegExp(reference)}\\s*$`, 'i'));
+
+    return {
+        status: { $in: [...ACTIVE_PROJECT_STATUSES] },
+        $or: [
+            { assignedEditorUserId: user._id },
+            {
+                // `{ field: null }` intentionally matches both null and missing
+                // values, but never overrides an immutable ID belonging to a
+                // different editor.
+                assignedEditorUserId: null,
+                $or: LEGACY_EDITOR_FIELDS.map(field => ({
+                    [field]: { $in: legacyReferences }
+                }))
+            }
+        ]
+    };
+};
+
+const filterActiveProjectsForUser = async (
+    projects,
+    user,
+    resolveAssignedUser = resolveProjectAssignedUser
+) => {
+    const userId = String(user?._id || '').trim();
+    if (!userId) return [];
+
+    const verified = await Promise.all((Array.isArray(projects) ? projects : []).map(async project => {
+        const immutableUserId = String(project?.assignedEditorUserId || '').trim();
+        if (immutableUserId) return immutableUserId === userId ? project : null;
+
+        const resolvedUser = await resolveAssignedUser(project);
+        return String(resolvedUser?._id || '').trim() === userId ? project : null;
+    }));
+    return verified.filter(Boolean);
 };
 
 const nextAssignmentVersion = project => Math.max(0, Number(project?.assignmentVersion) || 0) + 1;
@@ -264,15 +329,18 @@ const serializeProjectForApi = project => {
 };
 
 module.exports = {
+    ACTIVE_PROJECT_STATUSES,
     ASSIGNMENT_LIFECYCLE_FIELDS,
     DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS,
     acceptProjectAssignment,
     acknowledgeProjectAssignmentDelivery,
+    buildActiveProjectFilter,
     buildAcceptedBySnapshot,
     buildClearedAssignmentFields,
     buildPendingAssignmentFields,
     createHttpError,
     formatAssignmentForClient,
+    filterActiveProjectsForUser,
     getAssignmentTimeoutSeconds,
     getProjectUrl,
     hasRole,

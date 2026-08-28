@@ -5,6 +5,8 @@ const { authenticate } = require('../middleware/authenticate');
 const {
     acceptProjectAssignment,
     acknowledgeProjectAssignmentDelivery,
+    buildActiveProjectFilter,
+    filterActiveProjectsForUser,
     formatAssignmentForClient,
     getProjectUrl,
     hasRole,
@@ -50,6 +52,27 @@ router.get('/pending', async (req, res) => {
     } catch (error) {
         console.error('Pending project assignment sync failed:', error.message);
         return res.status(500).json({ error: 'Pending project assignments are unavailable' });
+    }
+});
+
+router.get('/active', async (req, res) => {
+    try {
+        const now = new Date();
+        const candidates = await Project.find(buildActiveProjectFilter(req.user))
+            .sort({ deadline: 1, updatedAt: -1 })
+            .lean();
+        const projects = await filterActiveProjectsForUser(candidates, req.user);
+
+        return res.json({
+            serverTime: now.toISOString(),
+            projects: projects.map(project => ({
+                ...serializeProjectForApi(project),
+                projectUrl: getProjectUrl(project)
+            }))
+        });
+    } catch (error) {
+        console.error('Active editor project sync failed:', error.message);
+        return res.status(500).json({ error: 'Active editor projects are unavailable' });
     }
 });
 

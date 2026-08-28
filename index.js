@@ -13,7 +13,10 @@ const EmailAccount = require('./models/EmailAccount');
 const Room = require('./models/Room');
 const { initializeWebPush } = require('./config/push');
 const { attachAuthenticatedSocketUser, getJwtSecret } = require('./middleware/authenticate');
-const { getNotificationSocketRoom, isPublicChatSocketRoom } = require('./services/socketNotifications');
+const {
+    initializeAuthenticatedNotificationSocket,
+    isPublicChatSocketRoom
+} = require('./services/socketNotifications');
 const { resolveUsersForReferences } = require('./services/pushRecipients');
 
 const app = express();
@@ -174,7 +177,10 @@ io.on('connection', (socket) => {
     };
 
     if (socket.authenticatedUser?._id) {
-        socket.join(getNotificationSocketRoom(socket.authenticatedUser._id));
+        void initializeAuthenticatedNotificationSocket(socket).catch(error => {
+            console.error('Authenticated notification socket setup failed:', error.message);
+            socket.disconnect(true);
+        });
     }
 
     socket.on('user_connected', (userName) => {

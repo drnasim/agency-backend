@@ -9,9 +9,12 @@ const mobileDeviceRoutes = require('../routes/mobileDevices');
 const projectAssignmentRoutes = require('../routes/projectAssignments');
 const projectRoutes = require('../routes/projects');
 const {
+    ACTIVE_PROJECT_STATUSES,
     acceptProjectAssignment,
     acknowledgeProjectAssignmentDelivery,
+    buildActiveProjectFilter,
     buildPendingAssignmentFields,
+    filterActiveProjectsForUser,
     serializeProjectForApi,
     stripProjectAssignmentLifecycleFields
 } = require('../services/projectAssignments');
@@ -316,6 +319,103 @@ test('project writes use object filters and lifecycle transitions compare assign
         projectRoutes.getProjectUpdateFilter('project-1', { assignmentVersion: 4 }, true),
         { _id: 'project-1', assignmentVersion: 4 }
     );
+});
+
+test('active project sync is scoped to the authenticated editor and nonterminal workflow statuses', async () => {
+    const handler = findRouteHandler(projectAssignmentRoutes, '/active', 'get');
+    const realFind = Project.find;
+    const authenticatedUserId = new mongoose.Types.ObjectId();
+    let capturedFilter;
+    let capturedSort;
+    Project.find = filter => {
+        capturedFilter = filter;
+        return {
+            sort(sort) {
+                capturedSort = sort;
+                return this;
+            },
+            async lean() {
+                return [{
+                    _id: 'project-1',
+                    assignedEditorUserId: authenticatedUserId,
+                    title: 'Launch video',
+                    client: 'Acme',
+                    status: 'In Progress',
+                    acceptedBy: {
+                        userId: 'editor-1',
+                        name: 'Editor One',
+                        email: 'private@example.com'
+                    }
+                }];
+            }
+        };
+    };
+
+    try {
+        const res = createResponseRecorder();
+        await handler({
+            user: {
+                _id: authenticatedUserId,
+                name: 'Editor One',
+                email: 'editor.one@example.com'
+            }
+        }, res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(String(capturedFilter.$or[0].assignedEditorUserId), String(authenticatedUserId));
+        assert.equal(capturedFilter.$or[1].assignedEditorUserId, null);
+        assert.deepEqual(
+            capturedFilter.$or[1].$or.map(clause => Object.keys(clause)[0]),
+            ['assignedEditor', 'editor', 'assignedTo']
+        );
+        assert.deepEqual(capturedFilter.status, { $in: ACTIVE_PROJECT_STATUSES });
+        assert.deepEqual(capturedSort, { deadline: 1, updatedAt: -1 });
+        assert.equal(res.body.projects.length, 1);
+        assert.equal(res.body.projects[0].projectUrl, '/project/project-1');
+        assert.deepEqual(res.body.projects[0].acceptedBy, {
+            userId: 'editor-1',
+            name: 'Editor One'
+        });
+        assert.equal(JSON.stringify(res.body).includes('private@example.com'), false);
+        assert.ok(Number.isFinite(new Date(res.body.serverTime).getTime()));
+    } finally {
+        Project.find = realFind;
+    }
+});
+
+test('legacy active projects are exact-match candidates and are verified against the authenticated editor', async () => {
+    const authenticatedUserId = new mongoose.Types.ObjectId();
+    const otherUserId = new mongoose.Types.ObjectId();
+    const user = {
+        _id: authenticatedUserId,
+        name: 'Editor.One',
+        email: 'editor.one@example.com'
+    };
+    const filter = buildActiveProjectFilter(user);
+    const legacyMatch = filter.$or[1];
+    const assignedEditorMatchers = legacyMatch.$or[0].assignedEditor.$in;
+
+    assert.ok(assignedEditorMatchers.some(matcher => matcher.test('EDITOR.ONE@EXAMPLE.COM')));
+    assert.ok(assignedEditorMatchers.some(matcher => matcher.test(' Editor.One ')));
+    assert.equal(assignedEditorMatchers.some(matcher => matcher.test('Editor.One Attacker')), false);
+    assert.deepEqual(filter.status, { $in: ACTIVE_PROJECT_STATUSES });
+
+    const projects = [
+        { _id: 'immutable-owned', assignedEditorUserId: authenticatedUserId },
+        { _id: 'immutable-other', assignedEditorUserId: otherUserId },
+        { _id: 'legacy-owned', assignedEditorUserId: null, assignedEditor: 'Editor.One' },
+        { _id: 'legacy-other', editor: 'Other Editor' },
+        { _id: 'legacy-ambiguous', assignedEditor: 'Shared Name' }
+    ];
+    const resolveLegacyOwner = async project => {
+        if (project._id === 'legacy-owned') return { _id: authenticatedUserId };
+        if (project._id === 'legacy-other') return { _id: otherUserId };
+        // Ambiguous legacy names deliberately resolve to no user.
+        return null;
+    };
+
+    const visible = await filterActiveProjectsForUser(projects, user, resolveLegacyOwner);
+    assert.deepEqual(visible.map(project => project._id), ['immutable-owned', 'legacy-owned']);
 });
 
 test('device registration binds a token to the authenticated user, never a supplied user id', async () => {
