@@ -119,6 +119,8 @@ const uploadRoutes = require('./routes/upload'); // <--- Cloudflare R2 Upload Ro
 const mailRoutes = require('./routes/mail');
 const liveTvRoutes = require('./routes/liveTv');
 const pushRoutes = require('./routes/push');
+const mobileDeviceRoutes = require('./routes/mobileDevices');
+const projectAssignmentRoutes = require('./routes/projectAssignments');
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -133,6 +135,8 @@ app.use('/api/upload', uploadRoutes); // <--- Cloudflare R2 Upload Route connect
 app.use('/api/mail', mailRoutes);
 app.use('/api/live-tv', liveTvRoutes);
 app.use('/api/push', pushRoutes);
+app.use('/api/mobile-devices', mobileDeviceRoutes);
+app.use('/api/project-assignments', projectAssignmentRoutes);
 
 const onlineUsers = new Map();
 

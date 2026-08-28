@@ -4,10 +4,14 @@
 // ============================================================
 const admin = require('firebase-admin');
 const User = require('./models/User');
+const MobileDevice = require('./models/MobileDevice');
 const { resolveUsersForReferences } = require('./services/pushRecipients');
 
 let initialized = false;
 const FCM_EVENT_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_PROJECT_ASSIGNMENT_FCM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MIN_PROJECT_ASSIGNMENT_FCM_TTL_MS = 60 * 60 * 1000;
+const MAX_PROJECT_ASSIGNMENT_FCM_TTL_MS = 28 * 24 * 60 * 60 * 1000;
 const recentFcmEvents = new Map();
 
 const claimFcmEvent = (token, eventId, now = Date.now()) => {
@@ -99,9 +103,172 @@ async function sendFcmAlarm(fcmToken, title, body, extra = {}) {
       err.code === 'messaging/registration-token-not-registered' ||
       err.code === 'messaging/invalid-registration-token'
     ) {
-      try { await User.updateOne({ fcmToken }, { fcmToken: '' }); } catch (_) {}
+      try { await removeInvalidFcmToken(fcmToken); } catch (_) {}
     }
   }
+}
+
+const stringifyFcmData = value => {
+  const data = {};
+  for (const [key, item] of Object.entries(value || {})) {
+    if (item !== undefined && item !== null) data[key] = String(item);
+  }
+  return data;
+};
+
+const getProjectAssignmentFcmTtlMs = () => {
+  const configuredSeconds = Number(process.env.PROJECT_ASSIGNMENT_FCM_TTL_SECONDS);
+  if (!Number.isFinite(configuredSeconds)) return DEFAULT_PROJECT_ASSIGNMENT_FCM_TTL_MS;
+  return Math.min(
+    MAX_PROJECT_ASSIGNMENT_FCM_TTL_MS,
+    Math.max(MIN_PROJECT_ASSIGNMENT_FCM_TTL_MS, Math.round(configuredSeconds * 1000))
+  );
+};
+
+const buildProjectAssignmentFcmMessage = (fcmToken, payload) => {
+  const action = String(payload?.action || 'assigned');
+  const isIncoming = action === 'assigned' || action === 'reassigned';
+  const data = stringifyFcmData({
+    type: 'project_assignment',
+    action,
+    eventId: payload?.eventId,
+    assignmentRequestId: payload?.assignmentRequestId,
+    assignmentVersion: payload?.assignmentVersion,
+    assignmentStatus: payload?.assignmentStatus,
+    projectId: payload?.projectId,
+    projectName: payload?.projectName,
+    clientName: payload?.clientName,
+    deadline: payload?.deadline,
+    priority: payload?.priority,
+    assignedAt: payload?.assignedAt,
+    deliveredAt: payload?.deliveredAt,
+    acceptedAt: payload?.acceptedAt,
+    assignmentExpiresAt: payload?.assignmentExpiresAt,
+    ringTimeoutSeconds: payload?.ringTimeoutSeconds,
+    acceptedByUserId: payload?.acceptedByUserId,
+    acceptedByName: payload?.acceptedByName,
+    reason: payload?.reason,
+    projectUrl: payload?.projectUrl,
+    title: payload?.title || (isIncoming ? 'New Project Assigned' : 'Project Assignment Updated'),
+    body: payload?.body || ''
+  });
+
+  return {
+    token: String(fcmToken || ''),
+    data,
+    android: {
+      priority: 'high',
+      // Keep delivery durable beyond the ringing window. The client reads
+      // assignmentExpiresAt and turns a late delivery into a silent, still
+      // accept-able pending request instead of ringing again.
+      ttl: getProjectAssignmentFcmTtlMs(),
+      collapseKey: `project-assignment:${String(payload?.projectId || 'unknown')}`
+    }
+  };
+};
+
+const isInvalidFcmTokenError = error => (
+  error?.code === 'messaging/registration-token-not-registered' ||
+  error?.code === 'messaging/invalid-registration-token'
+);
+
+const RETRYABLE_ASSIGNMENT_FCM_ERRORS = new Set([
+  'app/network-error',
+  'messaging/internal-error',
+  'messaging/message-rate-exceeded',
+  'messaging/quota-exceeded',
+  'messaging/server-unavailable',
+  'messaging/unknown-error'
+]);
+
+const isRetryableAssignmentFcmError = error => (
+  RETRYABLE_ASSIGNMENT_FCM_ERRORS.has(String(error?.code || ''))
+);
+
+const waitForRetry = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+const removeInvalidFcmToken = async fcmToken => {
+  await Promise.allSettled([
+    MobileDevice.deleteOne({ fcmToken }),
+    User.updateMany({ fcmToken }, { $set: { fcmToken: '' } })
+  ]);
+};
+
+const getFcmTokensForUserIds = async userIds => {
+  const normalizedIds = [...new Set((userIds || []).map(value => String(value || '').trim()).filter(Boolean))];
+  if (!normalizedIds.length) return [];
+
+  const tokens = new Set();
+  try {
+    const devices = await MobileDevice.find({ userId: { $in: normalizedIds }, enabled: true })
+      .select('fcmToken')
+      .lean();
+    devices.forEach(device => {
+      if (device?.fcmToken) tokens.add(String(device.fcmToken));
+    });
+  } catch (error) {
+    console.error('Mobile FCM token lookup error:', error.message);
+  }
+
+  // Assignment requests intentionally never consult User.fcmToken. That
+  // legacy scalar is written by an old unauthenticated compatibility endpoint;
+  // only devices registered through the authenticated installation API may
+  // receive private assignment data.
+  return [...tokens];
+};
+
+const getAlarmTokensForUsers = async (
+  users,
+  { deviceTokenLookup = getFcmTokensForUserIds } = {}
+) => {
+  const resolvedUsers = (users || []).filter(user => user?._id);
+  const deviceTokens = await deviceTokenLookup(resolvedUsers.map(user => user._id));
+  return [...new Set([
+    ...deviceTokens,
+    ...resolvedUsers.map(user => String(user.fcmToken || '').trim()).filter(Boolean)
+  ])];
+};
+
+const deliverProjectAssignmentMessages = async (
+  tokens,
+  payload,
+  {
+    messagingClient,
+    removeInvalidToken = removeInvalidFcmToken,
+    wait = waitForRetry,
+    retryDelaysMs = [250, 1000]
+  } = {}
+) => Promise.all((tokens || []).map(async token => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const messageId = await messagingClient.send(buildProjectAssignmentFcmMessage(token, payload));
+      return { token, delivered: true, messageId };
+    } catch (error) {
+      if (isInvalidFcmTokenError(error)) {
+        await removeInvalidToken(token);
+        return { token, delivered: false, code: error?.code || '' };
+      }
+
+      const retryDelay = retryDelaysMs[attempt];
+      if (isRetryableAssignmentFcmError(error) && Number.isFinite(retryDelay)) {
+        await wait(Math.max(0, retryDelay));
+        continue;
+      }
+
+      console.error('Project assignment FCM error:', error.message);
+      return { token, delivered: false, code: error?.code || '' };
+    }
+  }
+}));
+
+// Assignment messages are deliberately data-only. The Android app, not the
+// system tray's one-shot notification renderer, owns the call-style UI,
+// looping ringtone, vibration, timeout and stop controls.
+async function sendProjectAssignmentEventToUsers(userIds, payload) {
+  const app = init();
+  if (!app) return [];
+  const tokens = await getFcmTokensForUserIds(userIds);
+  return deliverProjectAssignmentMessages(tokens, payload, { messagingClient: admin.messaging() });
 }
 
 // Resolve authoritative stored references, collapse them to immutable users/tokens,
@@ -111,15 +278,16 @@ async function alarmUsers(references, title, body, extra = {}) {
   if (!uniqueReferences.length) return;
   try {
     const users = await resolveUsersForReferences(uniqueReferences);
+    const tokens = await getAlarmTokensForUsers(users);
     const sentTokens = new Set();
 
-    for (const user of users) {
-      if (!user?.fcmToken || sentTokens.has(user.fcmToken)) continue;
-      if (!claimFcmEvent(user.fcmToken, extra.eventId)) continue;
-      await sendFcmAlarm(user.fcmToken, title, body, extra);
-      sentTokens.add(user.fcmToken);
-      console.log(`📱 FCM alarm → ${user.name || user.email}`);
+    for (const token of tokens) {
+      if (sentTokens.has(token)) continue;
+      if (!claimFcmEvent(token, extra.eventId)) continue;
+      await sendFcmAlarm(token, title, body, extra);
+      sentTokens.add(token);
     }
+    if (sentTokens.size) console.log(`📱 FCM alarm → ${sentTokens.size} registered device(s)`);
   } catch (err) {
     console.error('alarmUsers lookup error:', err.message);
   }
@@ -152,4 +320,20 @@ async function sendFcmNotification(fcmToken, title, body) {
   }
 }
 
-module.exports = { claimFcmEvent, sendFcmAlarm, alarmUser, alarmUsers, sendFcmNotification };
+module.exports = {
+  alarmUser,
+  alarmUsers,
+  buildProjectAssignmentFcmMessage,
+  claimFcmEvent,
+  deliverProjectAssignmentMessages,
+  getAlarmTokensForUsers,
+  getFcmTokensForUserIds,
+  getProjectAssignmentFcmTtlMs,
+  isInvalidFcmTokenError,
+  isRetryableAssignmentFcmError,
+  removeInvalidFcmToken,
+  sendFcmAlarm,
+  sendFcmNotification,
+  sendProjectAssignmentEventToUsers,
+  stringifyFcmData
+};

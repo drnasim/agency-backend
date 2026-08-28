@@ -4,9 +4,21 @@ const Project = require('../models/Project');
 const Client = require('../models/Client');
 const { alarmUsers } = require('../fcm');
 const { resolveNotificationRecipient } = require('../utils/notificationRecipients');
-const { authenticate } = require('../middleware/authenticate');
+const { authenticate, requireAdmin } = require('../middleware/authenticate');
 const { deliverNotificationToReferences } = require('../services/notificationDelivery');
 const { resolveUsersForReferences } = require('../services/pushRecipients');
+const {
+    buildClearedAssignmentFields,
+    buildPendingAssignmentFields,
+    isTerminalProjectStatus,
+    isUnassignedReference,
+    normalizeEditorReference,
+    resolveAssignedEditorUser,
+    resolveProjectAssignedUser,
+    serializeProjectForApi,
+    stripProjectAssignmentLifecycleFields
+} = require('../services/projectAssignments');
+const { publishProjectAssignmentEvent } = require('../services/projectAssignmentEvents');
 const { buildClientGuidelineData } = require('../utils/clientGuidelines');
 
 const REVIEW_STATUSES = new Set(['Submitted', 'Under Review']);
@@ -24,7 +36,7 @@ const parseRequiredDate = (value, label) => {
 };
 
 const buildProjectUpdate = (body, oldProject) => {
-    const update = { ...body };
+    const update = stripProjectAssignmentLifecycleFields(body);
 
     // Creator identity is assigned from the authenticated session at creation and
     // cannot be redirected by a later assignment/submission request.
@@ -53,12 +65,27 @@ const buildProjectUpdate = (body, oldProject) => {
     return update;
 };
 
-const updateProjectById = async (projectId, update, oldProject) => {
+const getProjectUpdateFilter = (projectId, oldProject, assignmentTransition = false) => {
+    if (!assignmentTransition) return { _id: projectId };
+    const currentVersion = Math.max(0, Number(oldProject?.assignmentVersion) || 0);
+    return currentVersion === 0
+        ? {
+            _id: projectId,
+            $or: [
+                { assignmentVersion: 0 },
+                { assignmentVersion: { $exists: false } }
+            ]
+        }
+        : { _id: projectId, assignmentVersion: currentVersion };
+};
+
+const updateProjectById = async (projectId, update, oldProject, { assignmentTransition = false } = {}) => {
+    const filter = getProjectUpdateFilter(projectId, oldProject, assignmentTransition);
     if (!hasOwn(update, 'createdAt')) {
-        return Project.findByIdAndUpdate(
-            projectId,
+        return Project.findOneAndUpdate(
+            filter,
             { $set: update },
-            { new: true }
+            { new: true, runValidators: true }
         );
     }
 
@@ -66,10 +93,10 @@ const updateProjectById = async (projectId, update, oldProject) => {
 
     const { createdAt, ...schemaUpdate } = update;
     if (Object.keys(schemaUpdate).length > 0) {
-        const schemaUpdatedProject = await Project.findByIdAndUpdate(
-            projectId,
+        const schemaUpdatedProject = await Project.findOneAndUpdate(
+            filter,
             { $set: schemaUpdate },
-            { new: true }
+            { new: true, runValidators: true }
         );
 
         if (!schemaUpdatedProject) return null;
@@ -88,6 +115,144 @@ const updateProjectById = async (projectId, update, oldProject) => {
 const getAssignedEditor = (project) => {
     const editor = project.assignedEditor || project.editor || project.assignedTo || '';
     return String(editor).trim();
+};
+
+const getRequestedEditor = (oldProject, update) => {
+    if (hasOwn(update, 'assignedEditor')) return String(update.assignedEditor || '').trim();
+    if (hasOwn(update, 'editor')) return String(update.editor || '').trim();
+    if (hasOwn(update, 'assignedTo')) return String(update.assignedTo || '').trim();
+    return getAssignedEditor(oldProject);
+};
+
+const prepareProjectAssignmentTransition = async (oldProject, update, now = new Date()) => {
+    const oldEditor = getAssignedEditor(oldProject);
+    const newEditor = getRequestedEditor(oldProject, update);
+    const editorChanged = normalizeEditorReference(oldEditor) !== normalizeEditorReference(newEditor);
+    const nextStatus = hasOwn(update, 'status') ? update.status : oldProject?.status;
+    const terminalProject = isTerminalProjectStatus(nextStatus);
+    const terminalCancellation = oldProject?.assignmentStatus === 'pending' && terminalProject;
+
+    if (editorChanged) {
+        update.assignedEditor = newEditor;
+        update.editor = newEditor;
+    }
+
+    if (!editorChanged && !terminalCancellation) {
+        return { changed: false, oldEditor, newEditor };
+    }
+
+    // Preserve already-accepted history on a terminal project while allowing
+    // Admins to correct its legacy display fields. There is no live request to
+    // cancel and no new request may be created.
+    if (terminalProject && !terminalCancellation) {
+        return { changed: false, oldEditor, newEditor, terminal: true };
+    }
+
+    const oldRecipientUser = oldProject?.assignmentStatus === 'pending'
+        ? await resolveProjectAssignedUser(oldProject)
+        : null;
+
+    // A terminal project must never create a fresh assignment request merely
+    // because its historical editor field was corrected or changed.
+    if (terminalProject || isUnassignedReference(newEditor)) {
+        Object.assign(update, buildClearedAssignmentFields(oldProject));
+        return {
+            changed: true,
+            kind: 'cancelled',
+            reason: terminalProject ? 'project_terminal' : 'unassigned',
+            oldEditor,
+            newEditor,
+            oldRecipientUser,
+            newRecipientUser: null
+        };
+    }
+
+    const newRecipientUser = await resolveAssignedEditorUser(newEditor);
+    // Keep both legacy editor fields aligned so future authorization, filtering
+    // and lifecycle transitions cannot disagree about the current assignee.
+    Object.assign(update, buildPendingAssignmentFields({
+        project: oldProject,
+        assignedEditorUser: newRecipientUser,
+        now
+    }));
+    return {
+        changed: true,
+        kind: oldEditor ? 'reassigned' : 'assigned',
+        reason: oldEditor ? 'reassigned' : 'assigned',
+        oldEditor,
+        newEditor,
+        oldRecipientUser,
+        newRecipientUser
+    };
+};
+
+const buildAssignmentTransitionDeliveries = ({ oldProject, updatedProject, transition }) => {
+    if (!transition?.changed) return [];
+    const deliveries = [];
+    if (transition.oldRecipientUser) {
+        deliveries.push({
+            project: oldProject,
+            action: transition.reason === 'reassigned' ? 'reassigned' : 'cancelled',
+            reason: transition.reason,
+            recipientUserIds: [transition.oldRecipientUser._id]
+        });
+    }
+    if (transition.newRecipientUser) {
+        deliveries.push({
+            project: updatedProject,
+            // `assigned` is the only start action understood by Android;
+            // `reassigned` is reserved as a stop for the old request above.
+            action: 'assigned',
+            reason: transition.reason,
+            recipientUserIds: [transition.newRecipientUser._id]
+        });
+    }
+    return deliveries;
+};
+
+const publishAssignmentTransition = async ({ oldProject, updatedProject, transition }) => {
+    const deliveries = buildAssignmentTransitionDeliveries({ oldProject, updatedProject, transition });
+    for (const delivery of deliveries) {
+        await publishProjectAssignmentEvent({
+            ...delivery,
+            includeAdmins: true,
+            sendMobile: true
+        });
+    }
+
+    if (transition?.newRecipientUser) {
+
+        const copy = buildProjectAssignmentCopy(updatedProject);
+        await notifyProjectRecipient(
+            transition.newEditor,
+            copy.title,
+            copy.body,
+            updatedProject,
+            'new_project',
+            { sendFcm: false }
+        );
+    }
+};
+
+const publishAssignmentTransitionSafely = async options => {
+    try {
+        return await publishAssignmentTransition(options);
+    } catch (error) {
+        // Project persistence is authoritative. Await the delivery attempt to
+        // avoid a process-exit race, but do not invite duplicate mutations by
+        // failing an already-committed request when a provider is unavailable.
+        console.error('Project assignment transition delivery failed:', error.message);
+        return null;
+    }
+};
+
+const formatProjectForApi = project => {
+    const value = serializeProjectForApi(project);
+    if (!value) return value;
+    return {
+        ...value,
+        editor: value.editor || value.assignedTo || value.assignedEditor || 'Unassigned'
+    };
 };
 
 const uniqueIdentityList = (items = []) => (
@@ -117,7 +282,7 @@ const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
     return resolved.employee?.name || resolved.user?.name || resolved.reference || fallback;
 };
 
-const notifyProjectRecipients = async (recipients, title, body, project, type) => {
+const notifyProjectRecipients = async (recipients, title, body, project, type, { sendFcm = true } = {}) => {
     const projectId = project?._id?.toString();
     const eventId = getProjectNotificationEventId(project, type);
     const payload = {
@@ -134,11 +299,11 @@ const notifyProjectRecipients = async (recipients, title, body, project, type) =
 
     const uniqueRecipients = uniqueIdentityList(recipients);
     await deliverNotificationToReferences(uniqueRecipients, payload, { eventId });
-    await alarmUsers(uniqueRecipients, title, body, extra);
+    if (sendFcm) await alarmUsers(uniqueRecipients, title, body, extra);
 };
 
-const notifyProjectRecipient = async (recipient, title, body, project, type) => {
-    await notifyProjectRecipients([recipient], title, body, project, type);
+const notifyProjectRecipient = async (recipient, title, body, project, type, options) => {
+    await notifyProjectRecipients([recipient], title, body, project, type, options);
 };
 
 const getSubmissionNotificationRecipients = (project) => (
@@ -298,10 +463,7 @@ router.get('/', async (req, res) => {
             const projects = await Project.find(queryObj).sort({ createdAt: -1 }).lean();
             
             // ফ্রন্টএন্ডের জন্য এডিটর ফিল্ড ম্যাপ করা হচ্ছে
-            const formattedProjects = projects.map(project => ({
-                ...project,
-                editor: project.editor || project.assignedTo || project.assignedEditor || 'Unassigned'
-            }));
+            const formattedProjects = projects.map(formatProjectForApi);
 
             return res.status(200).json(formattedProjects);
         }
@@ -319,10 +481,7 @@ router.get('/', async (req, res) => {
             .limit(limitNumber)
             .lean();
 
-        const formattedProjects = projects.map(project => ({
-            ...project,
-            editor: project.editor || project.assignedTo || project.assignedEditor || 'Unassigned'
-        }));
+        const formattedProjects = projects.map(formatProjectForApi);
 
         res.status(200).json({
             projects: formattedProjects,
@@ -368,10 +527,10 @@ router.get('/analytics/completed-editor-revenue', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
     try {
-        const project = await Project.findById(req.params.id).lean();
+        let project = await Project.findById(req.params.id).lean();
         
         if (project) {
-            project.editor = project.editor || project.assignedTo || project.assignedEditor || 'Unassigned';
+            project = formatProjectForApi(project);
             const guidelineData = await resolveClientGuidelineData(project.client);
             project.clientGuidelines = guidelineData.clientGuidelines;
             project.clientGuidelineProfile = guidelineData.clientGuidelineProfile;
@@ -384,10 +543,17 @@ router.get('/:id', async (req, res) => {
 });
 
 // নতুন প্রজেক্ট — editor-কে ring দাও
-router.post('/', authenticate, async (req, res) => {
+router.post('/', authenticate, requireAdmin, async (req, res) => {
     try {
+        const safeBody = stripProjectAssignmentLifecycleFields(req.body);
+        delete safeBody.createdByUserId;
+        delete safeBody.createdBy;
+        delete safeBody.createdByEmail;
+        delete safeBody._id;
+        delete safeBody.__v;
+
         const projectPayload = {
-            ...req.body,
+            ...safeBody,
             createdByUserId: req.user._id,
             createdBy: req.user.name,
             createdByEmail: req.user.email
@@ -396,23 +562,52 @@ router.post('/', authenticate, async (req, res) => {
             projectPayload.completedAt = new Date();
         }
 
+        const assignedTo = getAssignedEditor(projectPayload);
+        let assignedEditorUser = null;
+        if (assignedTo && !isUnassignedReference(assignedTo) && !isTerminalProjectStatus(projectPayload.status)) {
+            assignedEditorUser = await resolveAssignedEditorUser(assignedTo);
+            projectPayload.assignedEditor = assignedTo;
+            projectPayload.editor = assignedTo;
+            Object.assign(projectPayload, buildPendingAssignmentFields({
+                project: null,
+                assignedEditorUser,
+                now: new Date()
+            }));
+        }
+
         const newProject = new Project(projectPayload);
         const savedProject = await newProject.save();
 
-        const assignedTo = getAssignedEditor(savedProject);
-        if (assignedTo) {
-            // Delivery is detached so push/FCM failures cannot fail or delay an
-            // otherwise successful project creation. Assignment remains authoritative,
-            // including when the creator is also the assigned recipient.
-            void (async () => {
+        if (assignedEditorUser) {
+            try {
+                await publishProjectAssignmentEvent({
+                    project: savedProject,
+                    action: 'assigned',
+                    reason: 'assigned',
+                    recipientUserIds: [assignedEditorUser._id],
+                    includeAdmins: true,
+                    sendMobile: true
+                });
                 const { title, body } = buildProjectAssignmentCopy(savedProject);
-                await notifyProjectRecipient(assignedTo, title, body, savedProject, 'new_project');
-            })().catch(error => console.error('Project assignment notification failed:', error.message));
+                await notifyProjectRecipient(
+                    assignedTo,
+                    title,
+                    body,
+                    savedProject,
+                    'new_project',
+                    { sendFcm: false }
+                );
+            } catch (error) {
+                console.error('Project assignment notification failed:', error.message);
+            }
         }
 
-        res.status(201).json(savedProject);
+        res.status(201).json(formatProjectForApi(savedProject));
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || (err.name === 'ValidationError' ? 400 : 500)).json({
+            error: err.message,
+            ...(err.code && typeof err.code === 'string' ? { code: err.code } : {})
+        });
     }
 });
 
@@ -423,27 +618,24 @@ router.put('/:id', authenticate, async (req, res) => {
         const update = buildProjectUpdate(req.body, oldProject);
         if (!oldProject) return res.status(404).json({ error: 'Project not found' });
         await assertProjectMutationAllowed(req.user, oldProject, update, { adminOnly: true });
-        
-        const updatedProject = await updateProjectById(req.params.id, update, oldProject);
 
-        if (!updatedProject) return res.status(404).json({ error: 'Project not found' });
+        const transition = await prepareProjectAssignmentTransition(oldProject, update);
+        const updatedProject = await updateProjectById(req.params.id, update, oldProject, {
+            assignmentTransition: transition.changed
+        });
 
-        // যদি লিস্ট থেকে এডিটর পরিবর্তন করা হয়, তবে নতুন এডিটরকে নোটিফিকেশন পাঠাবে
-        if (oldProject) {
-            const oldEditor = getAssignedEditor(oldProject);
-            const newEditor = getAssignedEditor(updatedProject);
-
-            // এডিটর চেঞ্জ হয়েছে কিনা চেক করা হচ্ছে
-            if (newEditor && String(oldEditor) !== String(newEditor)) {
-                const title = 'Project Re-assigned';
-                const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
-
-                void notifyProjectRecipient(newEditor, title, body, updatedProject, 'new_project')
-                    .catch(error => console.error('Project reassignment notification failed:', error.message));
-            }
+        if (!updatedProject) {
+            return res.status(transition.changed ? 409 : 404).json({
+                error: transition.changed
+                    ? 'The project assignment changed while this update was being saved. Refresh and try again.'
+                    : 'Project not found',
+                ...(transition.changed ? { code: 'PROJECT_ASSIGNMENT_CONFLICT' } : {})
+            });
         }
 
-        res.status(200).json(updatedProject);
+        await publishAssignmentTransitionSafely({ oldProject, updatedProject, transition });
+
+        res.status(200).json(formatProjectForApi(updatedProject));
     } catch (err) {
         res.status(err.statusCode || 500).json({ error: err.message });
     }
@@ -457,22 +649,23 @@ router.patch('/:id', authenticate, async (req, res) => {
         if (!oldProject) return res.status(404).json({ error: 'Project not found' });
         await assertProjectMutationAllowed(req.user, oldProject, update);
 
-        const updatedProject = await updateProjectById(req.params.id, update, oldProject);
+        const transition = await prepareProjectAssignmentTransition(oldProject, update);
+        const updatedProject = await updateProjectById(req.params.id, update, oldProject, {
+            assignmentTransition: transition.changed
+        });
 
-        if (!updatedProject) return res.status(404).json({ error: 'Project not found' });
-        if (!oldProject) return res.status(200).json(updatedProject);
+        if (!updatedProject) {
+            return res.status(transition.changed ? 409 : 404).json({
+                error: transition.changed
+                    ? 'The project assignment changed while this update was being saved. Refresh and try again.'
+                    : 'Project not found',
+                ...(transition.changed ? { code: 'PROJECT_ASSIGNMENT_CONFLICT' } : {})
+            });
+        }
+        await publishAssignmentTransitionSafely({ oldProject, updatedProject, transition });
 
         const projName = updatedProject.title || updatedProject.projectName || '';
         const assignedTo = getAssignedEditor(updatedProject);
-        const oldEditor = getAssignedEditor(oldProject);
-
-        if (assignedTo && String(oldEditor) !== String(assignedTo)) {
-            const title = 'Project Re-assigned';
-            const body = `${updatedProject.title || updatedProject.projectName || 'A project'} has been re-assigned to you.`;
-
-            void notifyProjectRecipient(assignedTo, title, body, updatedProject, 'new_project')
-                .catch(error => console.error('Project reassignment notification failed:', error.message));
-        }
 
         // 1. Editor submitted → notify only the recorded project creator.
         if (REVIEW_STATUSES.has(req.body.status) && !REVIEW_STATUSES.has(oldProject.status)) {
@@ -501,7 +694,7 @@ router.patch('/:id', authenticate, async (req, res) => {
             }
         }
 
-        res.status(200).json(updatedProject);
+        res.status(200).json(formatProjectForApi(updatedProject));
     } catch (err) {
         res.status(err.statusCode || 500).json({ error: err.message });
     }
@@ -513,17 +706,38 @@ router.delete('/:id', authenticate, async (req, res) => {
         if (!project) return res.status(404).json({ error: 'Project not found' });
         await assertProjectMutationAllowed(req.user, project, {}, { adminOnly: true });
         await Project.findByIdAndDelete(req.params.id);
+        if (project.assignmentStatus === 'pending') {
+            await (async () => {
+                const recipient = await resolveProjectAssignedUser(project);
+                if (!recipient) return;
+                await publishAssignmentTransition({
+                    oldProject: project,
+                    updatedProject: null,
+                    transition: {
+                        changed: true,
+                        oldRecipientUser: recipient,
+                        newRecipientUser: null,
+                        newEditor: '',
+                        reason: 'project_deleted'
+                    }
+                });
+            })().catch(error => console.error('Deleted project assignment cancellation failed:', error.message));
+        }
         res.status(200).json({ message: 'Project deleted successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || 500).json({ error: err.message });
     }
 });
 
 module.exports = router;
+module.exports.buildAssignmentTransitionDeliveries = buildAssignmentTransitionDeliveries;
 module.exports.buildProjectAssignmentCopy = buildProjectAssignmentCopy;
 module.exports.buildProjectUpdate = buildProjectUpdate;
+module.exports.formatProjectForApi = formatProjectForApi;
 module.exports.getProjectNotificationEventId = getProjectNotificationEventId;
 module.exports.getSubmissionNotificationRecipients = getSubmissionNotificationRecipients;
 module.exports.getProjectNotificationUrl = getProjectNotificationUrl;
+module.exports.getProjectUpdateFilter = getProjectUpdateFilter;
+module.exports.prepareProjectAssignmentTransition = prepareProjectAssignmentTransition;
 module.exports.resolveClientGuidelineData = resolveClientGuidelineData;
 module.exports.resolveClientGuidelines = resolveClientGuidelines;
