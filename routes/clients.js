@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const Client = require('../models/Client');
+const Project = require('../models/Project');
+const { ACTIVE_PROJECT_STATUSES } = require('../services/projectAssignments');
+const { publishEditorProjectUpdate } = require('../services/projectUpdates');
 const Settings = require('../models/Settings');
 const { authenticate, requireAdmin } = require('../middleware/authenticate');
 const {
@@ -83,6 +86,16 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
             { new: true, runValidators: true }
         );
         if (!updatedClient) return res.status(404).json({ error: 'Client not found' });
+        if (['guidelines', 'guidelineItems', 'guidelineNotes'].some(key => (
+            JSON.stringify(existingClient[key] ?? null) !== JSON.stringify(updatedClient[key] ?? null)
+        ))) {
+            await (async () => {
+                const projects = await Project.find({ client: existingClient.name, status: { $in: ACTIVE_PROJECT_STATUSES } });
+                for (const project of projects) await publishEditorProjectUpdate(
+                    project, 'guidelines_updated', 'Client guidelines updated', 'guidelines', updatedClient.updatedAt
+                );
+            })().catch(error => console.error('Client guideline update delivery failed:', error.message));
+        }
         res.status(200).json(updatedClient);
     } catch (err) {
         res.status(getClientErrorStatus(err)).json({ error: err.message });

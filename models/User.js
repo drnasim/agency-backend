@@ -16,6 +16,7 @@ const userSchema = new mongoose.Schema({
     dob: { type: String, default: '' },
     gender: { type: String, enum: ['Male', 'Female'], default: 'Male' },
     profilePic: { type: String, default: '' },
+    lastProjectClient: { type: mongoose.Schema.Types.ObjectId, ref: 'Client', default: null },
     // অ্যাকাউন্ট ডিলিট/ডিজেবল হলে false হবে — লগিন ব্লক হবে
     isActive: { type: Boolean, default: true },
 

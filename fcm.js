@@ -1,6 +1,7 @@
 // ============================================================
 // Firebase Cloud Messaging helper — sends high-priority data-only
-// messages that wake the Android pager app from killed state.
+// messages that ask Android to wake the pager app while backgrounded. Delivery
+// remains best-effort under OS/OEM policy and after a user force-stop.
 // ============================================================
 const admin = require('firebase-admin');
 const User = require('./models/User');
@@ -165,6 +166,7 @@ const buildProjectAssignmentFcmMessage = (fcmToken, payload) => {
     type: 'project_assignment',
     action,
     eventId: payload?.eventId,
+    createdAt: payload?.createdAt,
     assignmentRequestId: payload?.assignmentRequestId,
     assignmentVersion: payload?.assignmentVersion,
     assignmentStatus: payload?.assignmentStatus,

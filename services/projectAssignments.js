@@ -260,7 +260,7 @@ const acceptProjectAssignment = async ({
                     assignmentStatus: 'accepted',
                     acceptedAt: now,
                     deliveredAt: { $ifNull: ['$deliveredAt', now] },
-                    acceptedBy
+                    acceptedBy: { $literal: acceptedBy }
                 }
             }
         ],
@@ -328,6 +328,25 @@ const serializeProjectForApi = project => {
     return value;
 };
 
+const buildProjectAcceptanceResponse = ({
+    project,
+    requestId,
+    assignmentVersion,
+    alreadyAccepted
+}) => ({
+    assignmentStatus: 'accepted',
+    assignmentRequestId: String(requestId || ''),
+    assignmentVersion: Number(assignmentVersion) || 0,
+    acceptedAt: project?.acceptedAt,
+    acceptedBy: {
+        userId: String(project?.acceptedBy?.userId || ''),
+        name: String(project?.acceptedBy?.name || '')
+    },
+    project: serializeProjectForApi(project),
+    projectUrl: getProjectUrl(project),
+    alreadyAccepted: Boolean(alreadyAccepted)
+});
+
 module.exports = {
     ACTIVE_PROJECT_STATUSES,
     ASSIGNMENT_LIFECYCLE_FIELDS,
@@ -338,6 +357,7 @@ module.exports = {
     buildAcceptedBySnapshot,
     buildClearedAssignmentFields,
     buildPendingAssignmentFields,
+    buildProjectAcceptanceResponse,
     createHttpError,
     formatAssignmentForClient,
     filterActiveProjectsForUser,

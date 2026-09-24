@@ -83,6 +83,11 @@ test('project trigger copy and destination use only assigned-project fields', ()
     assert.equal(getProjectNotificationUrl(project), `/project/${projectId}`);
     assert.equal(getProjectNotificationEventId(project, 'new_project'), `new_project:${projectId}`);
     assert.equal(getProjectNotificationEventId(project, 'revision_needed'), `revision_needed:${projectId}`);
+    const updatedAt = new Date('2026-08-30T11:45:00.000Z');
+    assert.equal(
+        getProjectNotificationEventId({ ...project, updatedAt }, 'revision_needed'),
+        `revision_needed:${projectId}:${updatedAt.getTime()}`
+    );
 });
 
 test('project submission recipients come from the recorded creator, never a broad role fallback', () => {

@@ -2,12 +2,16 @@ const express = require('express');
 const router = express.Router();
 const Project = require('../models/Project');
 const Client = require('../models/Client');
+const { publishProjectChanges } = require('../services/projectUpdates');
 const { alarmUsers } = require('../fcm');
 const { resolveNotificationRecipient } = require('../utils/notificationRecipients');
 const { authenticate, requireAdmin } = require('../middleware/authenticate');
 const { deliverNotificationToReferences } = require('../services/notificationDelivery');
 const { resolveUsersForReferences } = require('../services/pushRecipients');
 const {
+    buildActiveProjectFilter,
+    filterActiveProjectsForUser,
+    hasRole,
     buildClearedAssignmentFields,
     buildPendingAssignmentFields,
     isTerminalProjectStatus,
@@ -71,12 +75,19 @@ const getProjectUpdateFilter = (projectId, oldProject, assignmentTransition = fa
     return currentVersion === 0
         ? {
             _id: projectId,
+            assignmentStatus: oldProject?.assignmentStatus ?? null,
             $or: [
                 { assignmentVersion: 0 },
                 { assignmentVersion: { $exists: false } }
             ]
         }
-        : { _id: projectId, assignmentVersion: currentVersion };
+        : {
+            _id: projectId,
+            assignmentVersion: currentVersion,
+            // Acceptance does not increment the request version. A terminal
+            // update prepared while pending must not erase a concurrent accept.
+            assignmentStatus: oldProject?.assignmentStatus ?? null
+        };
 };
 
 const updateProjectById = async (projectId, update, oldProject, { assignmentTransition = false } = {}) => {
@@ -131,26 +142,33 @@ const prepareProjectAssignmentTransition = async (oldProject, update, now = new 
     const nextStatus = hasOwn(update, 'status') ? update.status : oldProject?.status;
     const terminalProject = isTerminalProjectStatus(nextStatus);
     const terminalCancellation = oldProject?.assignmentStatus === 'pending' && terminalProject;
+    const becameTerminal = terminalProject && !isTerminalProjectStatus(oldProject?.status);
 
     if (editorChanged) {
         update.assignedEditor = newEditor;
         update.editor = newEditor;
     }
 
-    if (!editorChanged && !terminalCancellation) {
+    const reopened = isTerminalProjectStatus(oldProject?.status) && !terminalProject;
+    if (!editorChanged && !terminalCancellation && !becameTerminal && !reopened) {
         return { changed: false, oldEditor, newEditor };
     }
 
     // Preserve already-accepted history on a terminal project while allowing
     // Admins to correct its legacy display fields. There is no live request to
     // cancel and no new request may be created.
-    if (terminalProject && !terminalCancellation) {
+    if (terminalProject && !terminalCancellation && !becameTerminal) {
         return { changed: false, oldEditor, newEditor, terminal: true };
     }
-
-    const oldRecipientUser = oldProject?.assignmentStatus === 'pending'
-        ? await resolveProjectAssignedUser(oldProject)
-        : null;
+    const oldRecipientUser = await resolveProjectAssignedUser(oldProject);
+    if (terminalProject && !terminalCancellation) {
+        return {
+            changed: becameTerminal,
+            oldEditor, newEditor, terminal: true,
+            kind: 'cancelled', reason: nextStatus === 'Completed' ? 'project_completed' : 'project_cancelled',
+            oldRecipientUser, newRecipientUser: null
+        };
+    }
 
     // A terminal project must never create a fresh assignment request merely
     // because its historical editor field was corrected or changed.
@@ -159,7 +177,7 @@ const prepareProjectAssignmentTransition = async (oldProject, update, now = new 
         return {
             changed: true,
             kind: 'cancelled',
-            reason: terminalProject ? 'project_terminal' : 'unassigned',
+            reason: terminalProject ? (nextStatus === 'Completed' ? 'project_completed' : 'project_cancelled') : 'unassigned',
             oldEditor,
             newEditor,
             oldRecipientUser,
@@ -177,8 +195,8 @@ const prepareProjectAssignmentTransition = async (oldProject, update, now = new 
     }));
     return {
         changed: true,
-        kind: oldEditor ? 'reassigned' : 'assigned',
-        reason: oldEditor ? 'reassigned' : 'assigned',
+        kind: editorChanged && oldEditor ? 'reassigned' : 'assigned',
+        reason: reopened ? 'reopened' : oldEditor ? 'reassigned' : 'assigned',
         oldEditor,
         newEditor,
         oldRecipientUser,
@@ -272,9 +290,22 @@ const buildProjectAssignmentCopy = (project) => {
     };
 };
 
-const getProjectNotificationEventId = (project, type) => (
-    `${type}:${project?._id?.toString() || 'unknown'}`
-);
+const getProjectNotificationEventId = (project, type) => {
+    const base = `${type}:${project?._id?.toString() || 'unknown'}`;
+    const updatedAt = new Date(project?.updatedAt || 0).getTime();
+    // A project can enter Revision (or receive another typed update) more than
+    // once. Use the committed mutation timestamp so separate updates are not
+    // collapsed by FCM/socket history deduplication, while both transports for
+    // the same mutation still share one deterministic ID.
+    return Number.isFinite(updatedAt) && updatedAt > 0 ? `${base}:${updatedAt}` : base;
+};
+
+const getProjectNotificationTargetSection = type => ({
+    revision_needed: 'revisions',
+    deadline_changed: 'deadlines',
+    guidelines_updated: 'guidelines',
+    project_details_updated: 'updates'
+}[type] || 'updates');
 
 const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
     if (!recipient) return fallback;
@@ -284,6 +315,7 @@ const getRecipientDisplayName = async (recipient, fallback = 'Editor') => {
 
 const notifyProjectRecipients = async (recipients, title, body, project, type, { sendFcm = true } = {}) => {
     const projectId = project?._id?.toString();
+    const projectName = String(project?.title || project?.projectName || 'Project');
     const eventId = getProjectNotificationEventId(project, type);
     const payload = {
         type: 'project',
@@ -291,10 +323,16 @@ const notifyProjectRecipients = async (recipients, title, body, project, type, {
         body,
         url: getProjectNotificationUrl(project),
         entityId: projectId || '',
+        projectName,
         eventId,
         tag: eventId
     };
-    const extra = { type, eventId };
+    const extra = {
+        type,
+        eventId,
+        projectName,
+        targetSection: getProjectNotificationTargetSection(type)
+    };
     if (projectId) extra.projectId = projectId;
 
     const uniqueRecipients = uniqueIdentityList(recipients);
@@ -426,76 +464,50 @@ const resolveClientGuidelineData = async (clientName, clientModel = Client) => {
     return buildClientGuidelineData(client);
 };
 
-// সব প্রজেক্ট দেখার API (পেজিনেশন ও মাল্টিপল ফিল্টার সাপোর্ট সহ)
-router.get('/', async (req, res) => {
+// Project reads use the authenticated identity, never query-string roles or names.
+const requireProjectReader = (req, res, next) => (
+    hasRole(req.user, 'Admin') || hasRole(req.user, 'Editor')
+        ? next() : res.status(403).json({ error: 'Project access is required' })
+);
+router.get('/', authenticate, requireProjectReader, async (req, res) => {
     try {
-        const { page, limit, status, client, editor, projectType, paymentStatus, role } = req.query;
-
-        // ডাইনামিক ফিল্টার কুয়েরি তৈরি করা হচ্ছে
-        const queryObj = {};
-
-        // ইউজারের রোল ছোট/বড় হাতের যাই হোক না কেন, সেটা চেক করার জন্য
-        const isEditorRole = role && role.toLowerCase() === 'editor';
-
-        // এডিটরদের জন্য স্পেশাল রুল: তারা শুধু নির্দিষ্ট স্ট্যাটাসের প্রজেক্ট দেখতে পারবে
-        if (isEditorRole) {
-            queryObj.status = { $in: ['Pending', 'In Progress', 'Under Review', 'Revision'] };
-        } else if (status && status !== 'All') {
-            // অ্যাডমিনদের জন্য নরমাল স্ট্যাটাস ফিল্টার
-            queryObj.status = status;
+        const { page, limit, status, client, editor, projectType, paymentStatus } = req.query;
+        const admin = hasRole(req.user, 'Admin');
+        const filters = {};
+        if (status && status !== 'All') filters.status = status;
+        if (client && client !== 'All') filters.client = client;
+        if (projectType && projectType !== 'All') filters.projectType = projectType;
+        if (paymentStatus && paymentStatus !== 'All') filters.paymentStatus = paymentStatus;
+        if (admin && editor && editor !== 'All') {
+            filters.$or = [{ assignedEditor: editor }, { editor }, { assignedTo: editor }];
         }
-        
-        if (client && client !== 'All') queryObj.client = client;
-        if (projectType && projectType !== 'All') queryObj.projectType = projectType;
-        if (paymentStatus && paymentStatus !== 'All') queryObj.paymentStatus = paymentStatus;
-        
-        // এডিটর ফিল্টারের জন্য স্পেশাল লজিক, কারণ ডাটাবেসে কয়েকটা নামে সেভ থাকতে পারে
-        if (editor && editor !== 'All') {
-            queryObj.$or = [
-                { assignedEditor: editor },
-                { editor: editor },
-                { assignedTo: editor }
-            ];
+        const query = admin ? filters : { $and: [buildActiveProjectFilter(req.user), filters] };
+        const paginated = page !== undefined && limit !== undefined;
+        const pageNumber = Math.max(1, Number.parseInt(page, 10) || 1);
+        const limitNumber = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 20));
+        // Legacy names require a second identity check BEFORE counts/pagination.
+        if (!admin || !paginated) {
+            const candidates = await Project.find(query).sort({ createdAt: -1 }).lean();
+            const visible = admin ? candidates : await filterActiveProjectsForUser(candidates, req.user);
+            const projects = visible.map(formatProjectForApi);
+            return res.json(paginated ? {
+                projects: projects.slice((pageNumber - 1) * limitNumber, pageNumber * limitNumber),
+                totalProjects: projects.length, totalPages: Math.ceil(projects.length / limitNumber),
+                currentPage: pageNumber
+            } : projects);
         }
-
-        // যদি ফ্রন্টএন্ড থেকে page এবং limit না পাঠানো হয় (যাতে ফাইন্যান্স পেজ ঠিক থাকে)
-        if (!page || !limit) {
-            const projects = await Project.find(queryObj).sort({ createdAt: -1 }).lean();
-            
-            // ফ্রন্টএন্ডের জন্য এডিটর ফিল্ড ম্যাপ করা হচ্ছে
-            const formattedProjects = projects.map(formatProjectForApi);
-
-            return res.status(200).json(formattedProjects);
-        }
-
-        // যদি page এবং limit পাঠানো হয়, তবে ব্যাকএন্ড পেজিনেশন কাজ করবে
-        const pageNumber = parseInt(page);
-        const limitNumber = parseInt(limit);
-        const skip = (pageNumber - 1) * limitNumber;
-
-        // ফিল্টার অনুযায়ী ডাটাবেস থেকে নির্দিষ্ট লিমিটের ডাটা এবং মোট সংখ্যা বের করা
-        const totalProjects = await Project.countDocuments(queryObj);
-        const projects = await Project.find(queryObj)
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limitNumber)
-            .lean();
-
-        const formattedProjects = projects.map(formatProjectForApi);
-
-        res.status(200).json({
-            projects: formattedProjects,
-            totalProjects,
-            totalPages: Math.ceil(totalProjects / limitNumber),
-            currentPage: pageNumber
-        });
-
+        const [totalProjects, projects] = await Promise.all([
+            Project.countDocuments(query),
+            Project.find(query).sort({ createdAt: -1 }).skip((pageNumber - 1) * limitNumber).limit(limitNumber).lean()
+        ]);
+        return res.json({ projects: projects.map(formatProjectForApi), totalProjects,
+            totalPages: Math.ceil(totalProjects / limitNumber), currentPage: pageNumber });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Projects are unavailable' });
     }
 });
 
-router.get('/analytics/completed-editor-revenue', async (req, res) => {
+router.get('/analytics/completed-editor-revenue', authenticate, requireAdmin, async (req, res) => {
     try {
         const projects = await Project.find({ status: 'Completed' }).sort({ createdAt: -1 }).lean();
         const completedEditorProjects = projects
@@ -525,9 +537,17 @@ router.get('/analytics/completed-editor-revenue', async (req, res) => {
     }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', authenticate, requireProjectReader, async (req, res) => {
     try {
-        let project = await Project.findById(req.params.id).lean();
+        if (!require('mongoose').isValidObjectId(req.params.id)) {
+            return res.status(404).json({ error: 'Project is unavailable' });
+        }
+        const admin = hasRole(req.user, 'Admin');
+        let project = await Project.findOne(admin ? { _id: req.params.id } : {
+            _id: req.params.id, ...buildActiveProjectFilter(req.user)
+        }).lean();
+        if (project && !admin) [project] = await filterActiveProjectsForUser([project], req.user);
+        if (!project) return res.status(404).json({ error: 'Project is unavailable' });
         
         if (project) {
             project = formatProjectForApi(project);
@@ -634,6 +654,8 @@ router.put('/:id', authenticate, async (req, res) => {
         }
 
         await publishAssignmentTransitionSafely({ oldProject, updatedProject, transition });
+        await publishProjectChanges(oldProject, updatedProject, transition)
+            .catch(error => console.error('Project update delivery failed:', error.message));
 
         res.status(200).json(formatProjectForApi(updatedProject));
     } catch (err) {
@@ -663,6 +685,8 @@ router.patch('/:id', authenticate, async (req, res) => {
             });
         }
         await publishAssignmentTransitionSafely({ oldProject, updatedProject, transition });
+        await publishProjectChanges(oldProject, updatedProject, transition)
+            .catch(error => console.error('Project update delivery failed:', error.message));
 
         const projName = updatedProject.title || updatedProject.projectName || '';
         const assignedTo = getAssignedEditor(updatedProject);
@@ -683,16 +707,7 @@ router.patch('/:id', authenticate, async (req, res) => {
                 })().catch(error => console.error('Project submission notification failed:', error.message));
             }
         }
-        // 2. Admin requested revision → RING THE EDITOR
-        else if (req.body.status === 'Revision' && oldProject.status !== 'Revision') {
-            if (assignedTo) {
-                const title = 'Revision Needed';
-                const body = `Admin requested revision for: ${projName}`;
 
-                void notifyProjectRecipient(assignedTo, title, body, updatedProject, 'revision_needed')
-                    .catch(error => console.error('Project revision notification failed:', error.message));
-            }
-        }
 
         res.status(200).json(formatProjectForApi(updatedProject));
     } catch (err) {
@@ -706,7 +721,7 @@ router.delete('/:id', authenticate, async (req, res) => {
         if (!project) return res.status(404).json({ error: 'Project not found' });
         await assertProjectMutationAllowed(req.user, project, {}, { adminOnly: true });
         await Project.findByIdAndDelete(req.params.id);
-        if (project.assignmentStatus === 'pending') {
+        {
             await (async () => {
                 const recipient = await resolveProjectAssignedUser(project);
                 if (!recipient) return;

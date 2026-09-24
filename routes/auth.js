@@ -3,7 +3,12 @@ const router = express.Router();
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
 const { sendFcmAlarm, sendFcmNotification } = require('../fcm');
-const { createAuthToken } = require('../middleware/authenticate');
+const { createAuthToken, authenticate } = require('../middleware/authenticate');
+
+const projectClientPreference = require('../services/projectClientPreference');
+
+router.get('/project-client-preference', authenticate, projectClientPreference.read);
+router.put('/project-client-preference', authenticate, projectClientPreference.write);
 
 const PUBLIC_USER_FIELDS = 'name email role profilePic';
 

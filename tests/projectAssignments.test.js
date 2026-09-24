@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 
 const Project = require('../models/Project');
 const MobileDevice = require('../models/MobileDevice');
-const { requireAdmin } = require('../middleware/authenticate');
+const { authenticate, requireAdmin } = require('../middleware/authenticate');
 const mobileDeviceRoutes = require('../routes/mobileDevices');
 const projectAssignmentRoutes = require('../routes/projectAssignments');
 const projectRoutes = require('../routes/projects');
@@ -43,6 +43,8 @@ const createFakeProjectModel = initial => {
                     const [fieldReference, fallback] = value.$ifNull;
                     const sourceKey = String(fieldReference).replace(/^\$/, '');
                     this.state[key] = this.state[sourceKey] ?? fallback;
+                } else if (value && typeof value === 'object' && '$literal' in value) {
+                    this.state[key] = value.$literal;
                 } else {
                     this.state[key] = value;
                 }
@@ -316,8 +318,8 @@ test('project creation route enforces Admin access before its mutation handler',
 test('project writes use object filters and lifecycle transitions compare assignment versions', () => {
     assert.deepEqual(projectRoutes.getProjectUpdateFilter('project-1', {}, false), { _id: 'project-1' });
     assert.deepEqual(
-        projectRoutes.getProjectUpdateFilter('project-1', { assignmentVersion: 4 }, true),
-        { _id: 'project-1', assignmentVersion: 4 }
+        projectRoutes.getProjectUpdateFilter('project-1', { assignmentVersion: 4, assignmentStatus: 'pending' }, true),
+        { _id: 'project-1', assignmentVersion: 4, assignmentStatus: 'pending' }
     );
 });
 
@@ -381,6 +383,158 @@ test('active project sync is scoped to the authenticated editor and nonterminal 
     } finally {
         Project.find = realFind;
     }
+});
+
+test('editor project details are ownership-scoped and enrich the project with exact-client guidelines', async () => {
+    const editorId = new mongoose.Types.ObjectId();
+    const projectId = new mongoose.Types.ObjectId();
+    const now = new Date('2026-08-30T08:15:00.000Z');
+    let capturedProjectFilter;
+    let capturedClientFilter;
+    let capturedClientProjection;
+    const handler = projectAssignmentRoutes.createProjectDetailsHandler({
+        ProjectModel: {
+            findOne(filter) {
+                capturedProjectFilter = filter;
+                return {
+                    async lean() {
+                        return {
+                            _id: projectId,
+                            assignedEditorUserId: editorId,
+                            assignmentStatus: 'pending',
+                            title: 'Fortivus launch film',
+                            client: 'Acme Studios',
+                            status: 'In Progress',
+                            acceptedBy: {
+                                userId: editorId,
+                                name: 'Editor One',
+                                email: 'private@example.com'
+                            }
+                        };
+                    }
+                };
+            }
+        },
+        ClientModel: {
+            findOne(filter, projection) {
+                capturedClientFilter = filter;
+                capturedClientProjection = projection;
+                return {
+                    async lean() {
+                        return {
+                            guidelineItems: [
+                                {
+                                    category: 'Audio',
+                                    instruction: 'Avoid clipped dialogue',
+                                    ruleType: 'Avoid'
+                                },
+                                {
+                                    category: 'Brand',
+                                    instruction: 'Use the supplied logo lockup',
+                                    ruleType: 'Must Use'
+                                }
+                            ],
+                            guidelineNotes: 'Hold the end frame for two seconds.'
+                        };
+                    }
+                };
+            }
+        },
+        getNow: () => now
+    });
+
+    const res = createResponseRecorder();
+    await handler({
+        params: { projectId: projectId.toString() },
+        user: {
+            _id: editorId,
+            name: 'Editor One',
+            email: 'editor.one@example.com'
+        }
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(String(capturedProjectFilter._id), projectId.toString());
+    assert.equal(String(capturedProjectFilter.$or[0].assignedEditorUserId), editorId.toString());
+    assert.deepEqual(capturedProjectFilter.status, { $in: ACTIVE_PROJECT_STATUSES });
+    assert.deepEqual(capturedClientFilter, { name: 'Acme Studios' });
+    assert.deepEqual(capturedClientProjection, {
+        guidelines: 1,
+        guidelineItems: 1,
+        guidelineNotes: 1,
+        _id: 0
+    });
+    assert.equal(res.body.serverTime, now.toISOString());
+    assert.equal(res.body.project.projectUrl, `/project/${projectId}`);
+    assert.deepEqual(res.body.project.acceptedBy, {
+        userId: editorId.toString(),
+        name: 'Editor One'
+    });
+    assert.equal(res.body.project.clientGuidelineProfile.items[0].ruleType, 'Must Use');
+    assert.match(res.body.project.clientGuidelines, /Use the supplied logo lockup/);
+    assert.match(res.body.project.clientGuidelines, /Hold the end frame for two seconds/);
+    assert.equal(JSON.stringify(res.body).includes('private@example.com'), false);
+});
+
+test('editor project details conceal invalid, inactive or other-editor projects before guideline lookup', async () => {
+    const editorId = new mongoose.Types.ObjectId();
+    const otherEditorId = new mongoose.Types.ObjectId();
+    const projectId = new mongoose.Types.ObjectId();
+    let projectQueries = 0;
+    let clientQueries = 0;
+    const handler = projectAssignmentRoutes.createProjectDetailsHandler({
+        ProjectModel: {
+            findOne() {
+                projectQueries += 1;
+                return {
+                    async lean() {
+                        return {
+                            _id: projectId,
+                            assignedEditorUserId: otherEditorId,
+                            client: 'Private Client',
+                            status: 'In Progress'
+                        };
+                    }
+                };
+            }
+        },
+        ClientModel: {
+            findOne() {
+                clientQueries += 1;
+                return { async lean() { return null; } };
+            }
+        }
+    });
+
+    const invalidRes = createResponseRecorder();
+    await handler({
+        params: { projectId: 'not-a-valid-project-id' },
+        user: { _id: editorId }
+    }, invalidRes);
+    assert.equal(invalidRes.statusCode, 404);
+    assert.deepEqual(invalidRes.body, { error: 'Project is unavailable' });
+    assert.equal(projectQueries, 0);
+
+    const otherEditorRes = createResponseRecorder();
+    await handler({
+        params: { projectId: projectId.toString() },
+        user: { _id: editorId }
+    }, otherEditorRes);
+    assert.equal(otherEditorRes.statusCode, 404);
+    assert.deepEqual(otherEditorRes.body, { error: 'Project is unavailable' });
+    assert.equal(projectQueries, 1);
+    assert.equal(clientQueries, 0);
+});
+
+test('editor detail route is registered before assignment request action routes', () => {
+    const detailsIndex = projectAssignmentRoutes.stack.findIndex(candidate => (
+        candidate.route?.path === '/:projectId/details' && candidate.route.methods.get
+    ));
+    const deliveryIndex = projectAssignmentRoutes.stack.findIndex(candidate => (
+        candidate.route?.path === '/:requestId/delivered' && candidate.route.methods.post
+    ));
+    assert.ok(detailsIndex >= 0);
+    assert.ok(deliveryIndex > detailsIndex);
 });
 
 test('legacy active projects are exact-match candidates and are verified against the authenticated editor', async () => {
@@ -475,4 +629,171 @@ test('delivery acknowledgements reject installations not registered to the edito
         MobileDevice.exists = realExists;
         Project.findOneAndUpdate = realFindOneAndUpdate;
     }
+});
+
+test('mobile accept-project is an authenticated Editor route with the queue-safe body contract', () => {
+    const routeIndex = mobileDeviceRoutes.stack.findIndex(candidate => (
+        candidate.route?.path === '/accept-project' && candidate.route.methods.post
+    ));
+    const layer = mobileDeviceRoutes.stack[routeIndex];
+    const authenticationIndex = mobileDeviceRoutes.stack.findIndex(candidate => (
+        candidate.handle === authenticate
+    ));
+    assert.ok(layer);
+    assert.ok(authenticationIndex >= 0 && authenticationIndex < routeIndex);
+    assert.equal(layer.route.stack.length, 2);
+    assert.equal(layer.route.stack[0].handle, mobileDeviceRoutes.requireEditor);
+});
+
+test('mobile accept-project validates its installation and returns a stable accepted response', async () => {
+    const editorId = new mongoose.Types.ObjectId();
+    const now = new Date('2026-08-28T06:30:00.000Z');
+    const project = {
+        _id: 'project-1',
+        title: 'Launch video',
+        assignmentStatus: 'accepted',
+        assignmentRequestId: 'request-1',
+        assignmentVersion: 4,
+        acceptedAt: now,
+        acceptedBy: { userId: editorId, name: 'Editor One', email: 'private@example.com' }
+    };
+    const calls = { exists: [], heartbeat: [], accept: [], publish: [] };
+    const ProjectModel = { name: 'injected project model' };
+    const MobileDeviceModel = {
+        async exists(filter) {
+            calls.exists.push(filter);
+            return { _id: 'device-record' };
+        },
+        async updateOne(filter, update) {
+            calls.heartbeat.push({ filter, update });
+            return { matchedCount: 1 };
+        }
+    };
+    const handler = mobileDeviceRoutes.createAcceptProjectHandler({
+        ProjectModel,
+        MobileDeviceModel,
+        getNow: () => now,
+        acceptAssignment: async options => {
+            calls.accept.push(options);
+            return { project, alreadyAccepted: false };
+        },
+        publishEvent: async options => {
+            calls.publish.push(options);
+            return { mobileResults: [{ delivered: true }] };
+        }
+    });
+
+    const res = createResponseRecorder();
+    await handler({
+        body: {
+            assignmentRequestId: 'request-1',
+            assignmentVersion: 4,
+            installationId: 'installation-12345'
+        },
+        user: { _id: editorId, name: 'Editor One', role: ['Editor'] }
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(calls.accept[0].ProjectModel, ProjectModel);
+    assert.equal(calls.accept[0].requestId, 'request-1');
+    assert.equal(calls.accept[0].assignmentVersion, 4);
+    assert.equal(calls.accept[0].now, now);
+    assert.deepEqual(calls.exists[0], {
+        userId: editorId,
+        installationId: 'installation-12345',
+        enabled: true
+    });
+    assert.deepEqual(calls.heartbeat[0].update, { $set: { lastSeenAt: now } });
+    assert.equal(calls.publish.length, 1);
+    assert.equal(calls.publish[0].action, 'accepted');
+    assert.equal(calls.publish[0].sendMobile, true);
+    assert.deepEqual(res.body, {
+        assignmentStatus: 'accepted',
+        assignmentRequestId: 'request-1',
+        assignmentVersion: 4,
+        acceptedAt: now,
+        acceptedBy: { userId: editorId.toString(), name: 'Editor One' },
+        project: {
+            ...project,
+            acceptedBy: { userId: editorId.toString(), name: 'Editor One' }
+        },
+        projectUrl: '/project/project-1',
+        alreadyAccepted: false
+    });
+    assert.equal(JSON.stringify(res.body).includes('private@example.com'), false);
+});
+
+test('mobile accept-project retries are idempotent and do not republish acceptance', async () => {
+    const editorId = new mongoose.Types.ObjectId();
+    let publishCount = 0;
+    const handler = mobileDeviceRoutes.createAcceptProjectHandler({
+        acceptAssignment: async () => ({
+            alreadyAccepted: true,
+            project: {
+                _id: 'project-1',
+                assignmentStatus: 'accepted',
+                acceptedAt: new Date('2026-08-28T06:30:00.000Z'),
+                acceptedBy: { userId: editorId, name: 'Editor One' }
+            }
+        }),
+        publishEvent: async () => { publishCount += 1; }
+    });
+
+    const res = createResponseRecorder();
+    await handler({
+        body: { assignmentRequestId: 'request-1', assignmentVersion: 4 },
+        user: { _id: editorId, name: 'Editor One', role: ['Editor'] }
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.alreadyAccepted, true);
+    assert.equal(publishCount, 0);
+});
+
+test('mobile accept-project rejects an installation not owned by the editor before mutation', async () => {
+    let acceptAttempted = false;
+    const handler = mobileDeviceRoutes.createAcceptProjectHandler({
+        MobileDeviceModel: {
+            async exists() { return null; }
+        },
+        acceptAssignment: async () => {
+            acceptAttempted = true;
+            throw new Error('must not be reached');
+        }
+    });
+
+    const res = createResponseRecorder();
+    await handler({
+        body: {
+            assignmentRequestId: 'request-1',
+            assignmentVersion: 4,
+            installationId: 'installation-12345'
+        },
+        user: { _id: new mongoose.Types.ObjectId(), role: ['Editor'] }
+    }, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.equal(acceptAttempted, false);
+});
+
+test('mobile accept-project preserves stale assignment conflict semantics for queue retries', async () => {
+    const conflict = new Error('This assignment is no longer waiting for acceptance');
+    conflict.statusCode = 409;
+    conflict.code = 'ASSIGNMENT_NO_LONGER_PENDING';
+    const handler = mobileDeviceRoutes.createAcceptProjectHandler({
+        acceptAssignment: async () => { throw conflict; },
+        logger: { error() {} }
+    });
+
+    const res = createResponseRecorder();
+    await handler({
+        body: { assignmentRequestId: 'stale-request', assignmentVersion: 2 },
+        user: { _id: new mongoose.Types.ObjectId(), role: ['Editor'] }
+    }, res);
+
+    assert.equal(res.statusCode, 409);
+    assert.deepEqual(res.body, {
+        error: conflict.message,
+        code: 'ASSIGNMENT_NO_LONGER_PENDING'
+    });
 });

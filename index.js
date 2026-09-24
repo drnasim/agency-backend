@@ -124,6 +124,7 @@ const liveTvRoutes = require('./routes/liveTv');
 const pushRoutes = require('./routes/push');
 const mobileDeviceRoutes = require('./routes/mobileDevices');
 const projectAssignmentRoutes = require('./routes/projectAssignments');
+const startupRoutes = require('./routes/startup');
 
 app.use('/api/projects', projectRoutes);
 app.use('/api/clients', clientRoutes);
@@ -140,6 +141,7 @@ app.use('/api/live-tv', liveTvRoutes);
 app.use('/api/push', pushRoutes);
 app.use('/api/mobile-devices', mobileDeviceRoutes);
 app.use('/api/project-assignments', projectAssignmentRoutes);
+app.use('/api/startup', startupRoutes);
 
 const onlineUsers = new Map();
 

@@ -471,14 +471,15 @@ test('project details resolve guidelines by the existing client name', async () 
 });
 
 test('project details endpoint adds resolved client guidelines without changing project fields', async () => {
-    const originalFindProjectById = Project.findById;
+    const auth = installClientRouteTestAuth();
+    const originalFindProjectById = Project.findOne;
     const originalFindClient = Client.findOne;
     const app = express();
     app.use('/api/projects', projectRoutes);
 
-    Project.findById = () => ({
+    Project.findOne = () => ({
         lean: async () => ({
-            _id: 'project-1',
+            _id: '64b000000000000000000001',
             title: 'Launch Video',
             client: 'Acme Studio',
             assignedEditor: 'Editor One',
@@ -497,7 +498,7 @@ test('project details endpoint adds resolved client guidelines without changing 
 
     try {
         const { port } = server.address();
-        const response = await fetch(`http://127.0.0.1:${port}/api/projects/project-1`);
+        const response = await fetch(`http://127.0.0.1:${port}/api/projects/64b000000000000000000001`, { headers: { Authorization: `Bearer ${auth.token}` } });
         const project = await response.json();
 
         assert.equal(response.status, 200);
@@ -510,7 +511,8 @@ test('project details endpoint adds resolved client guidelines without changing 
             additionalNotes: 'Use Inter SemiBold.\nKeep captions white.'
         });
     } finally {
-        Project.findById = originalFindProjectById;
+        Project.findOne = originalFindProjectById;
+        auth.restore();
         Client.findOne = originalFindClient;
         await new Promise((resolve, reject) => {
             server.close(error => error ? reject(error) : resolve());

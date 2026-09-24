@@ -1,4 +1,6 @@
 const express = require('express');
+const mongoose = require('mongoose');
+const Client = require('../models/Client');
 const Project = require('../models/Project');
 const MobileDevice = require('../models/MobileDevice');
 const { authenticate } = require('../middleware/authenticate');
@@ -6,6 +8,7 @@ const {
     acceptProjectAssignment,
     acknowledgeProjectAssignmentDelivery,
     buildActiveProjectFilter,
+    buildProjectAcceptanceResponse,
     filterActiveProjectsForUser,
     formatAssignmentForClient,
     getProjectUrl,
@@ -14,6 +17,9 @@ const {
     serializeProjectForApi
 } = require('../services/projectAssignments');
 const { publishProjectAssignmentEvent } = require('../services/projectAssignmentEvents');
+const { buildClientGuidelineData } = require('../utils/clientGuidelines');
+
+const { getEditorWorkspaceEvents } = require('../services/editorWorkspaceEvents');
 
 const router = express.Router();
 
@@ -35,7 +41,73 @@ const publishSafely = async options => {
     }
 };
 
+const toLeanValue = async query => (
+    query && typeof query.lean === 'function' ? query.lean() : query
+);
+
+const createProjectDetailsHandler = ({
+    ProjectModel = Project,
+    ClientModel = Client,
+    buildProjectFilter = buildActiveProjectFilter,
+    filterProjects = filterActiveProjectsForUser,
+    formatGuidelines = buildClientGuidelineData,
+    isValidProjectId = mongoose.isValidObjectId,
+    getNow = () => new Date(),
+    logger = console
+} = {}) => async (req, res) => {
+    const projectId = String(req.params?.projectId || '').trim();
+    const unavailable = () => res.status(404).json({ error: 'Project is unavailable' });
+
+    if (!projectId || !isValidProjectId(projectId)) return unavailable();
+
+    try {
+        const project = await toLeanValue(ProjectModel.findOne({
+            _id: projectId,
+            ...buildProjectFilter(req.user)
+        }));
+        if (!project) return unavailable();
+
+        // The database filter keeps the common immutable-ID path narrow. The
+        // second verification is required for legacy records whose editor is
+        // stored only as a display-name/email reference.
+        const [visibleProject] = await filterProjects([project], req.user);
+        if (!visibleProject) return unavailable();
+
+        const clientName = String(visibleProject.client || '').trim();
+        const client = clientName
+            ? await toLeanValue(ClientModel.findOne(
+                { name: clientName },
+                {
+                    guidelines: 1,
+                    guidelineItems: 1,
+                    guidelineNotes: 1,
+                    _id: 0
+                }
+            ))
+            : null;
+        const guidelineData = formatGuidelines(client);
+
+        return res.json({
+            serverTime: getNow().toISOString(),
+            project: {
+                ...serializeProjectForApi(visibleProject),
+                projectUrl: getProjectUrl(visibleProject),
+                clientGuidelines: guidelineData.clientGuidelines,
+                clientGuidelineProfile: guidelineData.clientGuidelineProfile
+            }
+        });
+    } catch (error) {
+        logger.error('Editor project detail sync failed:', error.message);
+        return res.status(500).json({ error: 'Project details are unavailable' });
+    }
+};
+
 router.use(authenticate, requireEditor);
+
+router.get('/updates', async (req, res) => {
+    try { return res.json({ updates: await getEditorWorkspaceEvents(req.user._id) }); }
+    catch { return res.status(500).json({ error: 'Project updates are unavailable' }); }
+});
 
 router.get('/pending', async (req, res) => {
     try {
@@ -75,6 +147,8 @@ router.get('/active', async (req, res) => {
         return res.status(500).json({ error: 'Active editor projects are unavailable' });
     }
 });
+
+router.get('/:projectId/details', createProjectDetailsHandler());
 
 router.post('/:requestId/delivered', async (req, res) => {
     try {
@@ -157,19 +231,12 @@ router.post('/:requestId/accept', async (req, res) => {
             });
         }
 
-        return res.json({
-            assignmentStatus: 'accepted',
-            assignmentRequestId: requestId,
+        return res.json(buildProjectAcceptanceResponse({
+            project,
+            requestId,
             assignmentVersion,
-            acceptedAt: project.acceptedAt,
-            acceptedBy: {
-                userId: String(project.acceptedBy?.userId || ''),
-                name: String(project.acceptedBy?.name || '')
-            },
-            project: serializeProjectForApi(project),
-            projectUrl: getProjectUrl(project),
             alreadyAccepted
-        });
+        }));
     } catch (error) {
         console.error('Project assignment acceptance failed:', error.message);
         return res.status(error.statusCode || 500).json({
@@ -180,4 +247,5 @@ router.post('/:requestId/accept', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.createProjectDetailsHandler = createProjectDetailsHandler;
 module.exports.requireEditor = requireEditor;
