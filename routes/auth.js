@@ -6,6 +6,8 @@ const { sendFcmAlarm, sendFcmNotification } = require('../fcm');
 const { createAuthToken, authenticate } = require('../middleware/authenticate');
 
 const projectClientPreference = require('../services/projectClientPreference');
+const { photoMultipart, createPhotoUploadHandler } = require('../services/profilePhotoUpload');
+router.post('/profile/photo', authenticate, photoMultipart, createPhotoUploadHandler());
 
 router.get('/project-client-preference', authenticate, projectClientPreference.read);
 router.put('/project-client-preference', authenticate, projectClientPreference.write);
@@ -134,12 +136,34 @@ router.get('/me', async (req, res) => {
     }
 });
 
+const privateProfile = user => ({
+    _id: String(user._id), name: user.name || '', email: user.email || '',
+    role: Array.isArray(user.role) ? user.role : [user.role],
+    phone: user.phone || '', dob: user.dob || '', gender: user.gender || '', profilePic: user.profilePic || ''
+});
+router.get('/profile', authenticate, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if (!user || user.isActive === false) return res.status(404).json({ error: 'Profile unavailable' });
+        return res.json(privateProfile(user));
+    } catch { return res.status(500).json({ error: 'Profile could not be loaded' }); }
+});
+
 // প্রোফাইল আপডেট করার API
-router.put('/update', async (req, res) => {
+router.put(['/update', '/profile'], authenticate, async (req, res) => {
     try {
         const { currentEmail, name, newPassword, phone, dob, gender, profilePic } = req.body;
         
-        const user = await User.findOne({ email: currentEmail });
+        if (currentEmail && currentEmail.toLowerCase() !== req.user.email.toLowerCase()) return res.status(403).json({ error: 'You can only update your own profile' });
+        const fields = { name, phone, dob, gender, profilePic, newPassword };
+        if (Object.values(fields).some(value => value !== undefined && typeof value !== 'string')) return res.status(400).json({ error: 'Invalid profile fields' });
+        if (name !== undefined && (!name.trim() || name.length > 120)) return res.status(400).json({ error: 'Enter a name of up to 120 characters' });
+        if (phone && phone.length > 40) return res.status(400).json({ error: 'Phone number is too long' });
+        if (gender && !['Male', 'Female'].includes(gender)) return res.status(400).json({ error: 'Invalid gender' });
+        if (dob && (!/^\d{4}-\d{2}-\d{2}$/.test(dob) || !Number.isFinite(Date.parse(dob)) || new Date(dob).toISOString().slice(0, 10) !== dob || Date.parse(dob) > Date.now())) return res.status(400).json({ error: 'Enter a valid date of birth' });
+        if (newPassword && (newPassword.length < 8 || newPassword.length > 72)) return res.status(400).json({ error: 'Use a password with 8–72 characters' });
+        if (profilePic && (!/^https:\/\//i.test(profilePic) || profilePic.length > 2048)) return res.status(400).json({ error: 'Invalid profile photo URL' });
+        const user = await User.findById(req.user._id);
         if (!user) return res.status(404).json({ error: "User not found!" });
 
         const previousName = user.name;
@@ -152,8 +176,8 @@ router.put('/update', async (req, res) => {
             }
         }
 
-        if (name !== undefined) user.name = name;
-        if (phone !== undefined) user.phone = phone;
+        if (name !== undefined) user.name = name.trim();
+        if (phone !== undefined) user.phone = phone.trim() || undefined;
         if (dob !== undefined) user.dob = dob;
         if (gender !== undefined) user.gender = gender;
         if (profilePic !== undefined && profilePic !== "") user.profilePic = profilePic;
@@ -179,7 +203,7 @@ router.put('/update', async (req, res) => {
             email: updatedUser.email, 
             role: roleArray,
             primaryRole: primaryRole,
-            profilePic: updatedUser.profilePic 
+            ...privateProfile(updatedUser)
         });
     } catch (err) {
         console.error("Update Error:", err);

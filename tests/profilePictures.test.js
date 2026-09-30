@@ -114,6 +114,7 @@ test('user directory selects and returns profile pictures', async t => {
 
 test('successful profile updates broadcast the saved public avatar payload', async t => {
     const originalFindOne = User.findOne;
+    const originalFindById = User.findById;
     const previousIo = global.io;
     let saveCompleted = false;
     const emissions = [];
@@ -131,15 +132,14 @@ test('successful profile updates broadcast the saved public avatar payload', asy
         }
     };
 
-    User.findOne = async filter => {
-        assert.deepEqual(filter, { email: 'updated@example.com' });
-        return user;
-    };
+    User.findOne = () => ({ select: async () => user });
+    User.findById = async id => { assert.equal(id, user._id); return user; };
     global.io = {
         emit: (event, payload) => emissions.push({ event, payload, saveCompleted })
     };
     t.after(() => {
         User.findOne = originalFindOne;
+        User.findById = originalFindById;
         if (previousIo === undefined) delete global.io;
         else global.io = previousIo;
     });
@@ -151,7 +151,7 @@ test('successful profile updates broadcast the saved public avatar payload', asy
         `http://127.0.0.1:${server.address().port}/api/auth/update`,
         {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt.sign({ sub: user._id }, process.env.JWT_SECRET)}` },
             body: JSON.stringify({
                 currentEmail: 'updated@example.com',
                 name: 'Updated Name',
@@ -173,4 +173,47 @@ test('successful profile updates broadcast the saved public avatar payload', asy
             profilePic: 'https://images.example.com/updated-avatar.jpg'
         }
     }]);
+});
+
+test('personal profile is authenticated, private, and cannot update another account or roles', async t => {
+    const findOne = User.findOne, findById = User.findById;
+    const user = { _id: 'profile-owner', name: 'Owner', email: 'owner@test.local', role: ['Editor'], password: 'private-hash', fcmToken: 'private-token', phone: '+880123', gender: 'Female', dob: '2000-01-02', profilePic: '', save: async function () { return this; } };
+    User.findOne = () => ({ select: async () => user });
+    User.findById = async id => { assert.equal(id, user._id); return user; };
+    t.after(() => { User.findOne = findOne; User.findById = findById; });
+    const server = await startAuthServer(); t.after(() => closeServer(server));
+    const url = `http://127.0.0.1:${server.address().port}/api/auth/profile`;
+    const headers = { Authorization: `Bearer ${jwt.sign({ sub: user._id }, process.env.JWT_SECRET)}`, 'Content-Type': 'application/json' };
+    assert.equal((await fetch(url)).status, 401);
+    assert.equal((await fetch(url + '/photo', { method: 'POST' })).status, 401);
+    const form = new FormData(); form.append('image', Buffer.from('not an image').toString('base64'));
+    assert.equal((await fetch(url + '/photo', { method: 'POST', headers: { Authorization: headers.Authorization }, body: form })).status, 400);
+    assert.equal(user.profilePic, '', 'failed uploads never replace the saved avatar');
+    const realFetch = global.fetch;
+    let uploads = 0;
+    global.fetch = (target, options) => {
+        if (String(target).startsWith('https://api.imgbb.com/1/upload')) {
+            uploads++;
+            assert.equal(options.headers, undefined);
+            return Promise.resolve({ ok: true, json: async () => ({ success: true, data: { url: 'https://images.example.test/photo.jpg' } }) });
+        }
+        return realFetch(target, options);
+    };
+    try {
+        const valid = new FormData(); valid.append('image', Buffer.from([255,216,255,224,255,217]).toString('base64'));
+        const uploaded = await fetch(url + '/photo', { method: 'POST', headers: { Authorization: headers.Authorization }, body: valid });
+        assert.equal(uploaded.status, 200); assert.equal(uploads, 1);
+        const photo = await uploaded.json();
+        assert.equal((await fetch(url, { method: 'PUT', headers, body: JSON.stringify(photo) })).status, 200);
+        assert.equal(user.profilePic, photo.profilePic);
+    } finally { global.fetch = realFetch; }
+
+    const data = await (await fetch(url, { headers })).json();
+    assert.equal(data.phone, '+880123'); assert.equal(data.dob, '2000-01-02');
+    assert.equal(data.password, undefined); assert.equal(data.fcmToken, undefined);
+    assert.equal((await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ currentEmail: 'other@test.local', name: 'Hacked' }) })).status, 403);
+    assert.equal((await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ dob: '2000-02-31' }) })).status, 400);
+    const updated = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ name: 'Updated', role: ['Admin'] }) });
+    assert.equal(updated.status, 200); const value = await updated.json();
+    assert.equal(value.name, 'Updated'); assert.equal(value.phone, '+880123'); assert.deepEqual(value.role, ['Editor']);
 });
