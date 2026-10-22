@@ -142,6 +142,7 @@ app.use('/api/push', pushRoutes);
 app.use('/api/mobile-devices', mobileDeviceRoutes);
 app.use('/api/project-assignments', projectAssignmentRoutes);
 app.use('/api/startup', startupRoutes);
+app.use('/api/admin/overview', require('./routes/adminOverview'));
 
 const onlineUsers = new Map();
 
