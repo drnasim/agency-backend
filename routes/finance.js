@@ -13,16 +13,7 @@ const expenseSchema = new mongoose.Schema({
 
 const Expense = mongoose.models.Expense || mongoose.model('Expense', expenseSchema);
 
-// Crypto Wallet Database Schema & Model
-const walletSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    address: { type: String, required: true },
-    // 'BNB' ডাটাবেস স্কিমাতে যোগ করা হয়েছে
-    network: { type: String, enum: ['BTC', 'ETH', 'SOL', 'BNB'], required: true },
-    createdAt: { type: Date, default: Date.now }
-});
-
-const Wallet = mongoose.models.Wallet || mongoose.model('Wallet', walletSchema);
+const Wallet = require('../models/Wallet');
 
 // আগের মাস বের করার হেল্পার ফাংশন
 const getPreviousMonth = (currentMonthStr) => {
@@ -33,6 +24,13 @@ const getPreviousMonth = (currentMonthStr) => {
     const prevMonth = String(date.getMonth() + 1).padStart(2, '0');
     return `${prevYear}-${prevMonth}`;
 };
+
+const { authenticate, requireAdmin } = require('../middleware/authenticate');
+router.get('/wallet-balances', authenticate, requireAdmin, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try { return res.json(await require('../services/walletBalances').getWalletPortfolio()); }
+    catch { return res.status(503).json({ error: 'Wallet balances are temporarily unavailable' }); }
+});
 
 // GET /api/finance/expenses?month=YYYY-MM
 router.get('/expenses', async (req, res) => {

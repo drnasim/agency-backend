@@ -24,8 +24,8 @@ const { getEditorWorkspaceEvents } = require('../services/editorWorkspaceEvents'
 const router = express.Router();
 
 const requireEditor = (req, res, next) => {
-    if (!hasRole(req.user, 'Editor')) {
-        return res.status(403).json({ error: 'Editor access is required' });
+    if (!hasRole(req.user, 'Editor') && !hasRole(req.user, 'Admin')) {
+        return res.status(403).json({ error: 'Admin or Editor access is required' });
     }
     return next();
 };

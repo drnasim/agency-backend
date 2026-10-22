@@ -119,54 +119,42 @@ const priceProviders = [
   }
 ];
 
-router.get('/prices', async (req, res) => {
+const getCryptoPrices = async () => {
   if (cachedPrices && Date.now() - cachedAt < CACHE_TTL_MS) {
-    return res.json(pricePayload(cachedPrices, { stale: false, source: 'cache' }));
+    return pricePayload(cachedPrices, { source: 'cache' });
   }
-
   const providerResults = [];
-
   for (const provider of priceProviders) {
     try {
-      const prices = await fetchProviderPrices(provider);
-      cachedPrices = prices;
+      cachedPrices = await fetchProviderPrices(provider);
       cachedAt = Date.now();
-
-      res.set('Cache-Control', 'public, max-age=60');
-      return res.json(pricePayload(cachedPrices, {
-        stale: false,
+      return pricePayload(cachedPrices, {
         source: provider.name,
-        providers: [
-          ...providerResults,
-          { name: provider.name, ok: true }
-        ]
-      }));
-    } catch (error) {
-      providerResults.push({
-        name: provider.name,
-        ok: false,
-        error: error.message
+        providers: [...providerResults, { name: provider.name, ok: true }]
       });
+    } catch (error) {
+      providerResults.push({ name: provider.name, ok: false, error: error.message });
     }
   }
-
   const errorMessage = providerResults.map(result => result.error).filter(Boolean).join('; ') || 'Price providers unavailable';
-
-  if (cachedPrices) {
-    return res.json(pricePayload(cachedPrices, {
-      stale: true,
-      source: 'stale-cache',
-      error: errorMessage,
-      providers: providerResults
-    }));
-  }
-
-  return res.status(503).json({
-    error: 'Crypto price providers unavailable',
-    reason: 'provider_error',
-    isStale: false,
-    providers: providerResults
+  if (cachedPrices) return pricePayload(cachedPrices, {
+    stale: true, source: 'stale-cache', error: errorMessage, providers: providerResults
   });
+  const error = new Error('Crypto price providers unavailable');
+  error.providers = providerResults;
+  throw error;
+};
+
+router.get('/prices', async (req, res) => {
+  try {
+    const payload = await getCryptoPrices();
+    if (payload._meta.source !== 'cache' && !payload._meta.isStale) res.set('Cache-Control', 'public, max-age=60');
+    return res.json(payload);
+  } catch (error) {
+    return res.status(503).json({ error: 'Crypto price providers unavailable', reason: 'provider_error', isStale: false, providers: error.providers || [] });
+  }
 });
 
 module.exports = router;
+
+module.exports.getCryptoPrices = getCryptoPrices;
