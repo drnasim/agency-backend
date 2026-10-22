@@ -30,42 +30,7 @@ const projectValueUsd = project => {
     return Number(project.budget) || 0;
 };
 
-const fetchJson = async (url, body) => {
-    const response = await fetch(url, {
-        signal: AbortSignal.timeout(5000),
-        headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
-        ...(body ? { method: 'POST', body: JSON.stringify(body) } : {})
-    });
-    if (!response.ok) throw new Error('Balance provider unavailable');
-    const data = await response.json();
-    if (data.error) throw new Error('Balance provider rejected the request');
-    return data;
-};
-const fetchWalletBalance = async wallet => {
-    let balance;
-    if (wallet.network === 'BTC') {
-        const data = await fetchJson(`https://mempool.space/api/address/${encodeURIComponent(wallet.address)}`);
-        const funded = data.chain_stats?.funded_txo_sum, spent = data.chain_stats?.spent_txo_sum;
-        if (!Number.isFinite(funded) || !Number.isFinite(spent)) throw new Error('Invalid Bitcoin balance');
-        balance = (funded - spent) / 1e8;
-    } else {
-        const endpoints = { ETH: 'https://cloudflare-eth.com', SOL: 'https://solana-rpc.publicnode.com', BNB: 'https://bsc-dataseed.binance.org/' };
-        const url = endpoints[wallet.network];
-        if (!url) throw new Error('Unsupported wallet network');
-        const solana = wallet.network === 'SOL';
-        const data = await fetchJson(url, {
-            jsonrpc: '2.0', id: 1,
-            method: solana ? 'getBalance' : 'eth_getBalance',
-            params: solana ? [wallet.address] : [wallet.address, 'latest']
-        });
-        if (solana ? !Number.isFinite(data.result?.value) : !/^0x[0-9a-f]+$/i.test(data.result)) {
-            throw new Error('Invalid wallet balance response');
-        }
-        balance = solana ? data.result.value / 1e9 : Number.parseInt(data.result, 16) / 1e18;
-    }
-    if (!Number.isFinite(balance) || balance < 0) throw new Error('Invalid wallet balance');
-    return balance;
-};
+const { fetchWalletBalance, getWalletPortfolio } = require('./walletBalances');
 
 const cryptoBalance = async (wallets, { loadPrices = getCryptoPrices, loadBalance = fetchWalletBalance } = {}) => {
     if (!wallets.length) return { totalUsd: 0, status: 'ready' };
@@ -95,7 +60,7 @@ const getAdminOverview = async (now = new Date()) => {
             .select('budget budgetType perMinuteRate durationMinutes durationSeconds billableMinutes').lean(),
         Wallet.find().select('address network').lean()
     ]);
-    const crypto = await cryptoBalance(wallets);
+    const crypto = (await getWalletPortfolio(wallets)).summary;
     return {
         activeProjects,
         monthlyProjectValueUsd: Number(projects.reduce((sum, project) => sum + projectValueUsd(project), 0).toFixed(2)),

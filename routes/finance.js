@@ -25,6 +25,13 @@ const getPreviousMonth = (currentMonthStr) => {
     return `${prevYear}-${prevMonth}`;
 };
 
+const { authenticate, requireAdmin } = require('../middleware/authenticate');
+router.get('/wallet-balances', authenticate, requireAdmin, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try { return res.json(await require('../services/walletBalances').getWalletPortfolio()); }
+    catch { return res.status(503).json({ error: 'Wallet balances are temporarily unavailable' }); }
+});
+
 // GET /api/finance/expenses?month=YYYY-MM
 router.get('/expenses', async (req, res) => {
     try {
